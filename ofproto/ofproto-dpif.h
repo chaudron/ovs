@@ -204,7 +204,11 @@ struct group_dpif *group_dpif_lookup(struct ofproto_dpif *,
     DPIF_SUPPORT_FIELD(bool, explicit_drop_action, "Explicit Drop action")  \
                                                                             \
     /* True if the datapath supports balance_tcp optimization */            \
-    DPIF_SUPPORT_FIELD(bool, lb_output_action, "Optimized Balance TCP mode")
+    DPIF_SUPPORT_FIELD(bool, lb_output_action, "Optimized Balance TCP mode")\
+                                                                            \
+    /* True if the datapath supports dec_ttl action. */                     \
+    DPIF_SUPPORT_FIELD(bool, dec_ttl_action, "Decrement TTL action")
+
 
 
 /* Stores the various features which the corresponding backer supports. */

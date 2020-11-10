@@ -143,8 +143,10 @@ odp_action_len(uint16_t type)
     case OVS_ACTION_ATTR_POP_NSH: return 0;
     case OVS_ACTION_ATTR_CHECK_PKT_LEN: return ATTR_LEN_VARIABLE;
     case OVS_ACTION_ATTR_DROP: return sizeof(uint32_t);
+    case OVS_ACTION_ATTR_DEC_TTL: return ATTR_LEN_VARIABLE;
 
     case OVS_ACTION_ATTR_UNSPEC:
+    case OVS_ACTION_ATTR_ADD_MPLS:
     case __OVS_ACTION_ATTR_MAX:
         return ATTR_LEN_INVALID;
     }
@@ -1108,6 +1110,38 @@ format_odp_check_pkt_len_action(struct ds *ds, const struct nlattr *attr,
                            portno_names);
     ds_put_cstr(ds, "))");
 }
+static void
+format_dec_ttl_action(struct ds *ds,const struct nlattr *attr,
+                      const struct hmap *portno_names OVS_UNUSED)
+{
+    const struct nlattr *nla_acts = NULL;
+    bool is_dp_netdev = false;
+
+    if (attr->nla_len == 4) {
+        is_dp_netdev = true;
+    } else {
+        nla_acts = nl_attr_get(attr);
+        if (nla_acts->nla_type != OVS_DEC_TTL_ATTR_ACTION) {
+            is_dp_netdev = true;
+        }
+    }
+
+    ds_put_cstr(ds,"dec_ttl(le_1(");
+    if (is_dp_netdev) {
+        if (attr->nla_len == 4) {
+            ds_put_format(ds, "drop");
+        } else {
+            format_odp_actions(ds, nla_acts, nla_acts->nla_len, portno_names);
+        }
+    } else {
+        int len = nl_attr_get_size(attr);
+
+        len -= nl_attr_len_pad(nla_acts, len);
+        nla_acts = nl_attr_next(nla_acts);
+        format_odp_actions(ds, nla_acts, len, portno_names);
+    }
+    ds_put_format(ds, "))");
+}
 
 static void
 format_odp_action(struct ds *ds, const struct nlattr *a,
@@ -1256,7 +1290,11 @@ format_odp_action(struct ds *ds, const struct nlattr *a,
     case OVS_ACTION_ATTR_DROP:
         ds_put_cstr(ds, "drop");
         break;
+    case OVS_ACTION_ATTR_DEC_TTL:
+        format_dec_ttl_action(ds, a, portno_names);
+        break;
     case OVS_ACTION_ATTR_UNSPEC:
+    case OVS_ACTION_ATTR_ADD_MPLS:
     case __OVS_ACTION_ATTR_MAX:
     default:
         format_generic_odp_action(ds, a);
@@ -2496,6 +2534,23 @@ parse_odp_action__(struct parse_odp_context *context, const char *s,
             n += retval;
             nl_msg_end_nested(actions, actions_ofs);
             return n + 1;
+        }
+    }
+    {
+        if (!strncmp(s, "dec_ttl(le_1(", 13)) {
+            size_t actions_ofs;
+            int n = 13;
+
+            actions_ofs = nl_msg_start_nested(actions,
+                                              OVS_ACTION_ATTR_DEC_TTL);
+            int retval = parse_action_list(context, s + n, actions);
+            if (retval < 0) {
+                return retval;
+            }
+
+            n += retval;
+            nl_msg_end_nested(actions, actions_ofs);
+            return n + 2;
         }
     }
 

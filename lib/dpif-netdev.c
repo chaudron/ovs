@@ -7975,6 +7975,8 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
     case OVS_ACTION_ATTR_CT_CLEAR:
     case OVS_ACTION_ATTR_CHECK_PKT_LEN:
     case OVS_ACTION_ATTR_DROP:
+    case OVS_ACTION_ATTR_DEC_TTL:
+    case OVS_ACTION_ATTR_ADD_MPLS:
     case __OVS_ACTION_ATTR_MAX:
         OVS_NOT_REACHED();
     }
@@ -7991,7 +7993,7 @@ dp_netdev_execute_actions(struct dp_netdev_pmd_thread *pmd,
     struct dp_netdev_execute_aux aux = { pmd, flow };
 
     odp_execute_actions(&aux, packets, should_steal, actions,
-                        actions_len, dp_execute_cb);
+                        actions_len, dp_execute_cb, false);
 }
 
 struct dp_netdev_ct_dump {

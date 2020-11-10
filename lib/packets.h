@@ -1211,10 +1211,19 @@ bool in6_is_lla(struct in6_addr *addr);
 void ipv6_multicast_to_ethernet(struct eth_addr *eth,
                                 const struct in6_addr *ip6);
 
+static inline bool dl_type_is_ipv4(ovs_be16 dl_type)
+{
+    return dl_type == htons(ETH_TYPE_IP);
+}
+
+static inline bool dl_type_is_ipv6(ovs_be16 dl_type)
+{
+    return dl_type == htons(ETH_TYPE_IPV6);
+}
+
 static inline bool dl_type_is_ip_any(ovs_be16 dl_type)
 {
-    return dl_type == htons(ETH_TYPE_IP)
-        || dl_type == htons(ETH_TYPE_IPV6);
+    return dl_type_is_ipv4(dl_type) || dl_type_is_ipv6(dl_type);
 }
 
 /* Tunnel header */
