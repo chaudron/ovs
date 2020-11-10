@@ -1021,6 +1021,8 @@ enum ovs_action_attr {
 	OVS_ACTION_ATTR_METER,        /* u32 meter number. */
 	OVS_ACTION_ATTR_CLONE,        /* Nested OVS_CLONE_ATTR_*.  */
 	OVS_ACTION_ATTR_CHECK_PKT_LEN, /* Nested OVS_CHECK_PKT_LEN_ATTR_*. */
+	OVS_ACTION_ATTR_ADD_MPLS,      /* struct ovs_action_add_mpls. */
+	OVS_ACTION_ATTR_DEC_TTL,       /* Nested OVS_DEC_TTL_ATTR_*. */
 
 #ifndef __KERNEL__
 	OVS_ACTION_ATTR_TUNNEL_PUSH,   /* struct ovs_action_push_tnl*/
@@ -1123,5 +1125,13 @@ struct ovs_zone_limit {
 				      * actions in clone will not change flow
 				      * keys. False otherwise.
 				      */
+
+enum ovs_dec_ttl_attr {
+	OVS_DEC_TTL_ATTR_UNSPEC,
+	OVS_DEC_TTL_ATTR_ACTION,        /* Nested struct nlattr */
+	__OVS_DEC_TTL_ATTR_MAX
+ };
+
+#define OVS_DEC_TTL_ATTR_MAX (__OVS_DEC_TTL_ATTR_MAX - 1)
 
 #endif /* _LINUX_OPENVSWITCH_H */
