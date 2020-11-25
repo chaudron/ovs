@@ -27,6 +27,7 @@
 #include <linux/tc_act/tc_mirred.h>
 #include <linux/tc_act/tc_mpls.h>
 #include <linux/tc_act/tc_pedit.h>
+#include <linux/tc_act/tc_sample.h>
 #include <linux/tc_act/tc_skbedit.h>
 #include <linux/tc_act/tc_tunnel_key.h>
 #include <linux/tc_act/tc_vlan.h>
@@ -59,6 +60,10 @@
 #define TCA_CHAIN 11
 #define TCA_INGRESS_BLOCK 13
 #define TCA_DUMP_FLAGS 15
+#endif
+
+#ifndef TCA_PEDIT_KEY_EX_CMD_DEC
+#define TCA_PEDIT_KEY_EX_CMD_DEC 2
 #endif
 
 VLOG_DEFINE_THIS_MODULE(tc);
@@ -993,11 +998,6 @@ nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
         ex_type = nl_attr_find_nested(nla, TCA_PEDIT_KEY_EX_HTYPE);
         type = nl_attr_get_u16(ex_type);
 
-        err = csum_update_flag(flower, type);
-        if (err) {
-            return err;
-        }
-
         for (int j = 0; j < ARRAY_SIZE(flower_pedit_map); j++) {
             struct flower_key_to_pedit *m = &flower_pedit_map[j];
             int flower_off = m->flower_offset;
@@ -1034,6 +1034,36 @@ nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
                 *dst_m |= mask;
                 *dst |= data_word & mask;
             }
+        }
+
+        if (pe->nkeys == 1) {
+            /* Here we check if this pedit might be a dec_ttl pedit, if so
+             * report the action as such. */
+
+            const struct nlattr *ex_cmd;
+            int cmd;
+
+            ex_cmd = nl_attr_find_nested(nla, TCA_PEDIT_KEY_EX_CMD);
+            cmd = nl_attr_get_u16(ex_cmd);
+
+            if (cmd == TCA_PEDIT_KEY_EX_CMD_DEC) {
+
+                action = &flower->actions[flower->action_count++];
+                action->type = TC_ACT_DEC_TTL;
+
+                if (type == TCA_PEDIT_KEY_EX_HDR_TYPE_IP4) {
+                    action->dec_ttl.dl_type = ETH_TYPE_IP;
+                    flower->csum_update_flags |= TCA_CSUM_UPDATE_FLAG_IPV4HDR;
+                } else {
+                    action->dec_ttl.dl_type = ETH_TYPE_IPV6;
+                }
+                return 0;
+            }
+        }
+
+        err = csum_update_flag(flower, type);
+        if (err) {
+            return err;
         }
 
         keys++;
@@ -1697,6 +1727,9 @@ nl_parse_single_action(struct nlattr *action, struct tc_flower *flower,
         /* Added for TC rule only (not in OvS rule) so ignore. */
     } else if (!strcmp(act_kind, "ct")) {
         nl_parse_act_ct(act_options, flower);
+    } else if (!strcmp(act_kind, "sample")) {
+        //TODO: We need to eigher handle psample as a seperate userspace
+        // action, or it might be part of the previous sample action...
     } else {
         VLOG_ERR_RL(&error_rl, "unknown tc action kind: %s", act_kind);
         err = EINVAL;
@@ -1946,7 +1979,9 @@ nl_msg_put_act_pedit(struct ofpbuf *request, struct tc_pedit *parm,
     nl_msg_put_string(request, TCA_ACT_KIND, "pedit");
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS);
     {
-        parm->action = TC_ACT_PIPE;
+        if (!parm->action) {
+            parm->action = TC_ACT_PIPE;
+        }
 
         nl_msg_put_unspec(request, TCA_PEDIT_PARMS_EX, parm, ksize);
         offset_keys_ex = nl_msg_start_nested(request, TCA_PEDIT_KEYS_EX);
@@ -2462,6 +2497,91 @@ nl_msg_put_flower_rewrite_pedits(struct ofpbuf *request,
     return 0;
 }
 
+
+static void
+nl_msg_put_act_sample(struct ofpbuf *request, uint32_t rate, uint32_t group_id,
+                      int action)
+{
+    size_t offset;
+
+    nl_msg_put_string(request, TCA_ACT_KIND, "sample");
+    offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS | NLA_F_NESTED);
+    {
+        struct tc_sample parm = { .action = action };
+
+        nl_msg_put_unspec(request, TCA_SAMPLE_PARMS, &parm, sizeof parm);
+        nl_msg_put_u32(request, TCA_SAMPLE_RATE, rate);
+        nl_msg_put_u32(request, TCA_SAMPLE_PSAMPLE_GROUP, group_id);
+    }
+    nl_msg_end_nested(request, offset);
+}
+
+static int
+nl_msg_put_flower_dec_ttl(struct ofpbuf *request, struct tc_flower *flower,
+                          struct tc_action *action, uint16_t *act_index)
+{
+    struct {
+        struct tc_pedit sel;
+        struct tc_pedit_key keys[MAX_PEDIT_OFFSETS];
+        struct tc_pedit_key_ex keys_ex[MAX_PEDIT_OFFSETS];
+    } sel = {
+        .sel = {
+            .action = TC_ACT_JUMP + 2,
+            .nkeys = 1
+        },
+        .keys[0] = {
+            .val = TC_ACT_PIPE
+        },
+        .keys_ex[0] = {
+            .cmd = TCA_PEDIT_KEY_EX_CMD_DEC
+        }
+    };
+    ovs_be16 dl_type = action->dec_ttl.dl_type;
+    size_t act_offset;
+
+    switch (dl_type) {
+    case ETH_TYPE_IP:
+        sel.keys_ex[0].htype = TCA_PEDIT_KEY_EX_HDR_TYPE_IP4;
+        sel.keys[0].mask = htonl(0x00ffffff);
+        sel.keys[0].off = 8;
+        break;
+    case ETH_TYPE_IPV6:
+        sel.keys_ex[0].htype = TCA_PEDIT_KEY_EX_HDR_TYPE_IP6;
+        sel.keys[0].mask = htonl(0xffffff00);
+        sel.keys[0].off = 4;
+        break;
+    default:
+        return 0;
+    }
+
+    /* How does dec_ttl work for the TC datapath?
+     *
+     * The pedit DEC alternative action (TTL <= 1) will do pipe, psample, drop.
+     * The normal action would do a jump 2, i.e. skip the sample/drop action,
+     * and continue with the next action.
+     */
+    act_offset = nl_msg_start_nested(request, (*act_index)++);
+    nl_msg_put_act_pedit(request, &sel.sel, sel.keys_ex);
+    nl_msg_put_act_cookie(request, &flower->act_cookie);
+    nl_msg_end_nested(request, act_offset);
+
+    act_offset = nl_msg_start_nested(request, (*act_index)++);
+    //FIXME: We need an actual usable group, will come with psample patchset!
+    nl_msg_put_act_sample(request, 1, 1024, TC_ACT_SHOT);
+    nl_msg_end_nested(request, act_offset);
+
+    if (dl_type == ETH_TYPE_IP) {
+        flower->csum_update_flags |= TCA_CSUM_UPDATE_FLAG_IPV4HDR;
+
+        act_offset = nl_msg_start_nested(request, (*act_index)++);
+        nl_msg_put_act_csum(request, flower->csum_update_flags);
+        nl_msg_put_act_flags(request);
+        nl_msg_end_nested(request, act_offset);
+    }
+
+    return 0;
+}
+
 static int
 nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
 {
@@ -2620,6 +2740,10 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
                 nl_msg_put_act_ct(request, action);
                 nl_msg_put_act_cookie(request, &flower->act_cookie);
                 nl_msg_end_nested(request, act_offset);
+            }
+            break;
+            case TC_ACT_DEC_TTL: {
+                nl_msg_put_flower_dec_ttl(request, flower, action, &act_index);
             }
             break;
             }

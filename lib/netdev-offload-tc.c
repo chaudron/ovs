@@ -919,6 +919,20 @@ parse_tc_flower_to_match(struct tc_flower *flower,
                 nl_msg_put_u32(buf, OVS_ACTION_ATTR_RECIRC, action->chain);
             }
             break;
+            case TC_ACT_DEC_TTL: {
+                size_t offset = nl_msg_start_nested(buf,
+                                                    OVS_ACTION_ATTR_DEC_TTL);
+                size_t act_offset = nl_msg_start_nested(
+                    buf, OVS_DEC_TTL_ATTR_ACTION);
+
+                //EELCO TODO: Here we need some new action that say's skip
+                //            TC or something.
+                nl_msg_put_unspec(buf, OVS_ACTION_ATTR_USERSPACE, NULL, 0);
+
+                nl_msg_end_nested(buf, act_offset);
+                nl_msg_end_nested(buf, offset);
+            }
+            break;
             }
         }
     }
@@ -1424,6 +1438,7 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     uint32_t block_id = 0;
     struct nlattr *nla;
     struct tcf_id id;
+    int dec_ttl = 0;
     uint32_t chain;
     size_t left;
     int prio = 0;
@@ -1795,6 +1810,15 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
             action->type = TC_ACT_GOTO;
             action->chain = 0;  /* 0 is reserved and not used by recirc. */
             flower.action_count++;
+        } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_DEC_TTL) {
+            action->type = TC_ACT_DEC_TTL;
+            action->dec_ttl.dl_type = ntohs(get_dl_type(key));
+            flower.action_count++;
+            if (++dec_ttl > 1) {
+                VLOG_DBG_RL(&rl,
+                            "can only offload one dec_ttl action per flow");
+                return EOPNOTSUPP;
+            }
         } else {
             VLOG_DBG_RL(&rl, "unsupported put action type: %d",
                         nl_attr_type(nla));

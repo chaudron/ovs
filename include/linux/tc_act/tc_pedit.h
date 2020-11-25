@@ -46,6 +46,7 @@ enum pedit_header_type {
 enum pedit_cmd {
 	TCA_PEDIT_KEY_EX_CMD_SET = 0,
 	TCA_PEDIT_KEY_EX_CMD_ADD = 1,
+	TCA_PEDIT_KEY_EX_CMD_DEC = 2,
 	__PEDIT_CMD_MAX,
 };
 #define TCA_PEDIT_CMD_MAX (__PEDIT_CMD_MAX - 1)
