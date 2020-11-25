@@ -5203,8 +5203,7 @@ xlate_dec_ttl_action(struct xlate_ctx *ctx, struct ofpact_cnt_ids *ids)
         return;
     }
 
-    if (!ctx->xbridge->support.dec_ttl_action
-        || netdev_is_flow_api_enabled()) {
+    if (!ctx->xbridge->support.dec_ttl_action) {
         wc->masks.nw_ttl = 0xff;
         compose_dec_ttl(ctx, ids);
         return;

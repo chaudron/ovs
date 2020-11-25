@@ -993,11 +993,6 @@ nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
         ex_type = nl_attr_find_nested(nla, TCA_PEDIT_KEY_EX_HTYPE);
         type = nl_attr_get_u16(ex_type);
 
-        err = csum_update_flag(flower, type);
-        if (err) {
-            return err;
-        }
-
         for (int j = 0; j < ARRAY_SIZE(flower_pedit_map); j++) {
             struct flower_key_to_pedit *m = &flower_pedit_map[j];
             int flower_off = m->flower_offset;
@@ -1034,6 +1029,44 @@ nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
                 *dst_m |= mask;
                 *dst |= data_word & mask;
             }
+        }
+
+        if (pe->nkeys == 1) {
+            /* Here we check if this pedit might a dec_ttl pedit, if so
+             * report the action as such. */
+
+            const struct nlattr *ex_cmd;
+            int cmd;
+
+            ex_cmd = nl_attr_find_nested(nla, TCA_PEDIT_KEY_EX_CMD);
+            cmd = nl_attr_get_u16(ex_cmd);
+
+            if (cmd == TCA_PEDIT_KEY_EX_CMD_ADD &&
+                ((type == TCA_PEDIT_KEY_EX_HDR_TYPE_IP4 &&
+                 keys->mask == htonl(0x00ffffff) &&
+                 keys->val == htonl(0xff000000) &&
+                 keys->off == 8) ||
+                 (type == TCA_PEDIT_KEY_EX_HDR_TYPE_IP6 &&
+                  keys->mask == htonl(0xffffff00) &&
+                  keys->val == htonl(0x000000ff) &&
+                  keys->off == 4))) {
+
+                action = &flower->actions[flower->action_count++];
+                action->type = TC_ACT_DEC_TTL;
+
+                if (type == TCA_PEDIT_KEY_EX_HDR_TYPE_IP4) {
+                    action->dec_ttl.dl_type = ETH_TYPE_IP;
+                    flower->csum_update_flags |= TCA_CSUM_UPDATE_FLAG_IPV4HDR;
+                } else {
+                    action->dec_ttl.dl_type = ETH_TYPE_IPV6;
+                }
+                return 0;
+            }
+        }
+
+        err = csum_update_flag(flower, type);
+        if (err) {
+            return err;
         }
 
         keys++;
@@ -2463,6 +2496,48 @@ nl_msg_put_flower_rewrite_pedits(struct ofpbuf *request,
 }
 
 static int
+nl_msg_put_flower_dec_ttl(struct ofpbuf *request, struct tc_flower *flower,
+                          ovs_be16 dl_type)
+{
+    struct {
+        struct tc_pedit sel;
+        struct tc_pedit_key keys[MAX_PEDIT_OFFSETS];
+        struct tc_pedit_key_ex keys_ex[MAX_PEDIT_OFFSETS];
+    } sel = {
+        .sel = {
+            .nkeys = 1
+        }
+    };
+
+    switch (dl_type) {
+    case ETH_TYPE_IP:
+        sel.keys_ex[0].cmd = TCA_PEDIT_KEY_EX_CMD_ADD;
+        sel.keys_ex[0].htype = TCA_PEDIT_KEY_EX_HDR_TYPE_IP4;
+        sel.keys[0].mask = htonl(0x00ffffff);
+        sel.keys[0].val = htonl(0xff000000);
+        sel.keys[0].off = 8;
+        break;
+    case ETH_TYPE_IPV6:
+        sel.keys_ex[0].cmd = TCA_PEDIT_KEY_EX_CMD_ADD;
+        sel.keys_ex[0].htype = TCA_PEDIT_KEY_EX_HDR_TYPE_IP6;
+        sel.keys[0].mask = htonl(0xffffff00);
+        sel.keys[0].val = htonl(0x000000ff);
+        sel.keys[0].off = 4;
+        break;
+    default:
+        return 0;
+    }
+
+    nl_msg_put_act_pedit(request, &sel.sel, sel.keys_ex);
+
+    if (dl_type == ETH_TYPE_IP) {
+        flower->csum_update_flags |= TCA_CSUM_UPDATE_FLAG_IPV4HDR;
+    }
+
+    return 0;
+}
+
+static int
 nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
 {
     bool ingress, released = false;
@@ -2620,6 +2695,23 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
                 nl_msg_put_act_ct(request, action);
                 nl_msg_put_act_cookie(request, &flower->act_cookie);
                 nl_msg_end_nested(request, act_offset);
+            }
+            break;
+            case TC_ACT_DEC_TTL: {
+                act_offset = nl_msg_start_nested(request, act_index++);
+                error = nl_msg_put_flower_dec_ttl(request, flower,
+                                                  action->dec_ttl.dl_type);
+                if (error) {
+                    return error;
+                }
+                nl_msg_end_nested(request, act_offset);
+
+                if (flower->csum_update_flags) {
+                    act_offset = nl_msg_start_nested(request, act_index++);
+                    nl_msg_put_act_csum(request, flower->csum_update_flags);
+                    nl_msg_put_act_flags(request);
+                    nl_msg_end_nested(request, act_offset);
+                }
             }
             break;
             }

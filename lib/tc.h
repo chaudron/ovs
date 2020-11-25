@@ -171,6 +171,7 @@ enum tc_action_type {
     TC_ACT_MPLS_SET,
     TC_ACT_GOTO,
     TC_ACT_CT,
+    TC_ACT_DEC_TTL,
 };
 
 enum nat_type {
@@ -253,6 +254,9 @@ struct tc_action {
             bool force;
             bool commit;
         } ct;
+        struct {
+            ovs_be16 dl_type;
+        } dec_ttl;
      };
 
      enum tc_action_type type;
