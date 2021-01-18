@@ -1079,6 +1079,76 @@ nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
     return 0;
 }
 
+void
+check_and_add_multi_rule_actions(struct tcf_id *flower_id,
+                                 struct tc_flower *flower)
+{
+    struct tcf_id id;
+    struct tc_action *action;
+    struct nl_dump nl_dump;
+    struct ofpbuf nl_flow;
+    struct ofpbuf rbuff;
+    struct ofpbuf request;
+
+    if (flower->action_count <= 0)
+        return;
+
+    action = &flower->actions[flower->action_count - 1];
+
+    /* For now we take a shortcut as only dec_ttl has multi rules */
+    if (action->type != TC_ACT_GOTO ||
+        !tc_is_multi_rule_recird_id(action->chain))
+        return;
+
+    /*
+     * For now we need to query all TC entries fro te action->chain match
+     * to find the two matching entries.
+     */
+
+    memset(&nl_dump, 0, sizeof nl_dump);
+    id = tc_make_tcf_id_chain(flower_id->ifindex, flower_id->block_id,
+                              action->chain, 0, flower_id->hook);
+    request_from_tcf_id(&id, 0, RTM_GETTFILTER, NLM_F_DUMP, &request);
+    nl_dump_start(&nl_dump, NETLINK_ROUTE, &request);
+    ofpbuf_uninit(&request);
+
+    ofpbuf_init(&rbuff, NL_DUMP_BUFSIZE);
+    while (nl_dump_next(&nl_dump, &nl_flow, &rbuff)) {
+
+        struct tcf_id tmp_id;
+        struct tc_flower tmp_flower;
+
+        tmp_id = id;
+        if (parse_netlink_to_tc_flower(&nl_flow, &tmp_id, &tmp_flower,
+                                       false, true)) {
+            continue;
+        }
+
+        if (tmp_id.prio == TC_RESERVED_PRIORITY_DEC_TTL_IPV4 ||
+            tmp_id.prio == TC_RESERVED_PRIORITY_DEC_TTL_IPV6) {
+
+            action->type = TC_ACT_DEC_TTL;
+            action->dec_ttl.dl_type = tmp_id.prio ==
+                TC_RESERVED_PRIORITY_DEC_TTL_IPV4 ? ETH_TYPE_IP : ETH_TYPE_IPV6;
+            action->dec_ttl.chain = tmp_id.chain;
+
+            //[Eelco]TODO: Here we should copy the exception actions once added
+
+        } else if (tmp_id.prio == flower_id->prio) {
+            //[Eelco]TODO: Copy remaining actions, make sure we do size check.
+
+            memcpy(&flower->actions[flower->action_count],
+                   &tmp_flower.actions[1],
+                   tmp_flower.action_count * sizeof(struct tc_action));
+            flower->action_count += tmp_flower.action_count - 1;
+        }
+        //[Eelco]TODO: Make sure all two sub-flows are present and processed
+    }
+    //[Eelco]TODO: Take care of nested dec_ttl (other multi flow TC actions).
+    ofpbuf_uninit(&rbuff);
+}
+
+
 static const struct nl_policy tunnel_key_policy[] = {
     [TCA_TUNNEL_KEY_PARMS] = { .type = NL_A_UNSPEC,
                                .min_len = sizeof(struct tc_tunnel_key),
@@ -1848,7 +1918,8 @@ skip_flower_opts:
 
 int
 parse_netlink_to_tc_flower(struct ofpbuf *reply, struct tcf_id *id,
-                           struct tc_flower *flower, bool terse)
+                           struct tc_flower *flower, bool terse,
+                           bool parse_multi_flows)
 {
     struct tcmsg *tc;
     struct nlattr *ta[ARRAY_SIZE(tca_policy)];
@@ -1883,6 +1954,11 @@ parse_netlink_to_tc_flower(struct ofpbuf *reply, struct tcf_id *id,
 
     if (ta[TCA_CHAIN]) {
         id->chain = nl_attr_get_u32(ta[TCA_CHAIN]);
+
+        //[Eelco]TODO: Skip all the none main flows in the report...
+        if (tc_is_multi_rule_recird_id(id->chain) && !parse_multi_flows) {
+            return EAGAIN;
+        }
     }
 
     kind = nl_attr_get_string(ta[TCA_KIND]);
@@ -1919,6 +1995,12 @@ tc_del_filter(struct tcf_id *id)
     struct ofpbuf request;
 
     request_from_tcf_id(id, 0, RTM_DELTFILTER, NLM_F_ACK, &request);
+
+    if (id->multi_rule) {
+        //[Eelco]TODO: Here we need a nice way to determine which flows to
+        // cleanup additional to the main one
+    }
+
     return tc_transact(&request, NULL);
 }
 
@@ -1935,7 +2017,7 @@ tc_get_flower(struct tcf_id *id, struct tc_flower *flower)
         return error;
     }
 
-    error = parse_netlink_to_tc_flower(reply, id, flower, false);
+    error = parse_netlink_to_tc_flower(reply, id, flower, false, false);
     ofpbuf_delete(reply);
     return error;
 }
@@ -2534,11 +2616,58 @@ nl_msg_put_flower_dec_ttl(struct ofpbuf *request, struct tc_flower *flower,
         flower->csum_update_flags |= TCA_CSUM_UPDATE_FLAG_IPV4HDR;
     }
 
+    nl_msg_put_act_cookie(request, &flower->act_cookie);
     return 0;
 }
 
+static int tc_get_action_start(struct tc_flower *flower, unsigned int pass,
+                               enum tc_pass_stage *stage)
+{
+    int i;
+
+    if (pass == 0) {
+        *stage = TC_STAGE_NONE;
+        return 0;
+    }
+
+    for (i = 0; i < flower->action_count; i++) {
+        switch (flower->actions[i].type) {
+        case TC_ACT_DEC_TTL:
+            pass--;
+            if (pass == 0) {
+                *stage = TC_STAGE_DEC_TTL_EXCEPTION;
+                return i;
+            }
+            pass--;
+            if (pass == 0) {
+                *stage = TC_STAGE_DEC_TTL_EXECUTE;
+                return i;
+            }
+            break;
+
+        case TC_ACT_OUTPUT:
+        case TC_ACT_ENCAP:
+        case TC_ACT_PEDIT:
+        case TC_ACT_VLAN_POP:
+        case TC_ACT_VLAN_PUSH:
+        case TC_ACT_MPLS_POP:
+        case TC_ACT_MPLS_PUSH:
+        case TC_ACT_MPLS_SET:
+        case TC_ACT_GOTO:
+        case TC_ACT_CT:
+            /* Currently only the DEC_TTL action can result in multiple rules
+             * being installed.
+             */
+            break;
+        }
+    }
+
+    return i;
+}
+
 static int
-nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
+nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower,
+                       unsigned int pass)
 {
     bool ingress, released = false;
     size_t offset;
@@ -2546,13 +2675,16 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
     uint16_t act_index = 1;
     struct tc_action *action;
     int i, ifindex = 0;
+    enum tc_pass_stage stage;
+    bool break_out = false;
 
     offset = nl_msg_start_nested(request, TCA_FLOWER_ACT);
     {
         int error;
 
         action = flower->actions;
-        for (i = 0; i < flower->action_count; i++, action++) {
+        for (i = tc_get_action_start(flower, pass, &stage);
+             i < flower->action_count; i++, action++) {
             switch (action->type) {
             case TC_ACT_PEDIT: {
                 act_offset = nl_msg_start_nested(request, act_index++);
@@ -2698,22 +2830,47 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
             }
             break;
             case TC_ACT_DEC_TTL: {
-                act_offset = nl_msg_start_nested(request, act_index++);
-                error = nl_msg_put_flower_dec_ttl(request, flower,
-                                                  action->dec_ttl.dl_type);
-                if (error) {
-                    return error;
-                }
-                nl_msg_end_nested(request, act_offset);
-
-                if (flower->csum_update_flags) {
+                switch (stage) {
+                case TC_STAGE_NONE:
                     act_offset = nl_msg_start_nested(request, act_index++);
-                    nl_msg_put_act_csum(request, flower->csum_update_flags);
-                    nl_msg_put_act_flags(request);
+                    nl_msg_put_act_gact(request, action->dec_ttl.chain);
+                    nl_msg_put_act_cookie(request, &flower->act_cookie);
                     nl_msg_end_nested(request, act_offset);
+                    break_out = true;
+                    break;
+
+                case TC_STAGE_DEC_TTL_EXCEPTION:
+                    //[Eelco]TODO: For now we do drop action for this
+                    act_offset = nl_msg_start_nested(request, act_index++);
+                    nl_msg_put_act_gact(request, 0);
+                    nl_msg_put_act_cookie(request, &flower->act_cookie);
+                    nl_msg_end_nested(request, act_offset);
+                    break_out = true;
+                    break;
+
+                case TC_STAGE_DEC_TTL_EXECUTE:
+                    act_offset = nl_msg_start_nested(request, act_index++);
+                    error = nl_msg_put_flower_dec_ttl(request, flower,
+                                                      action->dec_ttl.dl_type);
+
+                    if (error) {
+                        return error;
+                    }
+                    nl_msg_end_nested(request, act_offset);
+
+                    if (flower->csum_update_flags) {
+                        act_offset = nl_msg_start_nested(request, act_index++);
+                        nl_msg_put_act_csum(request, flower->csum_update_flags);
+                        nl_msg_put_act_flags(request);
+                        nl_msg_end_nested(request, act_offset);
+                    }
+                    break;
                 }
             }
             break;
+            }
+            if (break_out) {
+                break;
             }
         }
     }
@@ -2727,7 +2884,7 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
     }
     nl_msg_end_nested(request, offset);
 
-    return 0;
+    return break_out ? EXFULL /* ERANGE */ : 0;
 }
 
 static void
@@ -2835,8 +2992,72 @@ nl_msg_put_flower_tunnel(struct ofpbuf *request, struct tc_flower *flower)
     nl_msg_put_masked_value(request, type, type##_MASK, &flower->key.member, \
                             &flower->mask.member, sizeof flower->key.member)
 
+
 static int
-nl_msg_put_flower_options(struct ofpbuf *request, struct tc_flower *flower)
+nl_msg_put_flower_split_rule_match(struct ofpbuf *request,
+                                   struct tc_flower *flower,
+                                   unsigned int pass,
+                                   bool more_filters)
+{
+    struct tc_action *action;
+    enum tc_pass_stage stage = TC_STAGE_NONE;
+    uint16_t host_eth_type = ntohs(flower->key.eth_type);
+    int i;
+
+    i = tc_get_action_start(flower, pass, &stage);
+    if (i >= flower->action_count)
+        return EINVAL;
+
+    action = &flower->actions[i];
+    switch (action->type) {
+
+    case TC_ACT_DEC_TTL:
+        if (host_eth_type != ETH_P_IP && host_eth_type != ETH_P_IPV6) {
+            return EINVAL;
+        }
+
+        if (stage == TC_STAGE_DEC_TTL_EXCEPTION) {
+
+            uint8_t ttl_mask = 0xfe, ttl = 0;
+
+            nl_msg_put_masked_value(request,
+                                    TCA_FLOWER_KEY_IP_TTL,
+                                    TCA_FLOWER_KEY_IP_TTL_MASK,
+                                    &ttl, &ttl_mask, sizeof ttl);
+
+            nl_msg_put_be16(request, TCA_FLOWER_KEY_ETH_TYPE,
+                            flower->key.eth_type);
+
+        } else if (stage == TC_STAGE_DEC_TTL_EXECUTE) {
+
+            nl_msg_put_be16(request, TCA_FLOWER_KEY_ETH_TYPE,
+                            flower->key.eth_type);
+
+        }
+        break;
+
+    case TC_ACT_OUTPUT:
+    case TC_ACT_ENCAP:
+    case TC_ACT_PEDIT:
+    case TC_ACT_VLAN_POP:
+    case TC_ACT_VLAN_PUSH:
+    case TC_ACT_MPLS_POP:
+    case TC_ACT_MPLS_PUSH:
+    case TC_ACT_MPLS_SET:
+    case TC_ACT_GOTO:
+    case TC_ACT_CT:
+        /* Currently only the DEC_TTL action can result in multiple rules
+         * being installed.
+         */
+        break;
+    }
+
+    return more_filters ? EXFULL : 0;
+}
+
+static int
+nl_msg_put_flower_options(struct ofpbuf *request, struct tc_flower *flower,
+                          unsigned int pass)
 {
 
     uint16_t host_eth_type = ntohs(flower->key.eth_type);
@@ -2844,13 +3065,27 @@ nl_msg_put_flower_options(struct ofpbuf *request, struct tc_flower *flower)
     bool is_qinq = is_vlan && eth_type_vlan(flower->key.encap_eth_type[0]);
     bool is_mpls = eth_type_mpls(flower->key.eth_type);
     enum tc_offload_policy policy = flower->tc_policy;
+    bool more_filters;
     int err;
 
     /* need to parse acts first as some acts require changing the matching
      * see csum_update_flag()  */
-    err  = nl_msg_put_flower_acts(request, flower);
-    if (err) {
+
+    //[Eelco]TODO: We need to make sure the above is fixed, as now we stop
+    //             processing...
+
+    err  = nl_msg_put_flower_acts(request, flower, pass);
+    more_filters = (err == EXFULL) ? true : false;
+    if (err && !more_filters) {
         return err;
+    }
+
+    if (pass != 0) {
+        /* On the non zero pass, we might need some customer filters
+         * depending on the action that requested the flow to be divided.
+         */
+        return nl_msg_put_flower_split_rule_match(request, flower, pass,
+                                                  more_filters);
     }
 
     if (is_vlan) {
@@ -2979,7 +3214,7 @@ nl_msg_put_flower_options(struct ofpbuf *request, struct tc_flower *flower)
         nl_msg_put_flower_tunnel(request, flower);
     }
 
-    return 0;
+    return more_filters ? EXFULL : 0;
 }
 
 int
@@ -2990,31 +3225,72 @@ tc_replace_flower(struct tcf_id *id, struct tc_flower *flower)
     int error = 0;
     size_t basic_offset;
     uint16_t eth_type = (OVS_FORCE uint16_t) flower->key.eth_type;
+    bool more = false;
+    int pass = 0;
 
-    request_from_tcf_id(id, eth_type, RTM_NEWTFILTER,
-                        NLM_F_CREATE | NLM_F_ECHO, &request);
 
-    nl_msg_put_string(&request, TCA_KIND, "flower");
-    basic_offset = nl_msg_start_nested(&request, TCA_OPTIONS);
-    {
-        error = nl_msg_put_flower_options(&request, flower);
+    do {
+        if (pass == 0) {
+            request_from_tcf_id(id, eth_type, RTM_NEWTFILTER,
+                                NLM_F_CREATE | NLM_F_ECHO, &request);
+        } else {
+            int i;
+            struct tcf_id new_id;
+            enum tc_pass_stage stage = TC_STAGE_NONE;
 
-        if (error) {
-            ofpbuf_uninit(&request);
-            return error;
+            i = tc_get_action_start(flower, pass, &stage);
+            //[Eelco]TODO:Need to rework all code to only do get_action_start
+            //            once.
+            if (flower->actions[i].type !=  TC_ACT_DEC_TTL) {
+                return EINVAL;
+            }
+
+            memcpy(&new_id, id, sizeof new_id);
+            if (stage == TC_STAGE_DEC_TTL_EXCEPTION) {
+                //[Eelco]TODO: Need to check ipv4/vs6
+                new_id.prio = TC_RESERVED_PRIORITY_DEC_TTL_IPV4;
+            }
+            new_id.chain = flower->actions[i].dec_ttl.chain;
+            request_from_tcf_id(&new_id, eth_type, RTM_NEWTFILTER,
+                                NLM_F_CREATE | NLM_F_ECHO, &request);
         }
-    }
-    nl_msg_end_nested(&request, basic_offset);
 
-    error = tc_transact(&request, &reply);
-    if (!error) {
-        struct tcmsg *tc =
-            ofpbuf_at_assert(reply, NLMSG_HDRLEN, sizeof *tc);
+        nl_msg_put_string(&request, TCA_KIND, "flower");
+        basic_offset = nl_msg_start_nested(&request, TCA_OPTIONS);
+        {
+            error = nl_msg_put_flower_options(&request, flower, pass);
+            more = (error == EXFULL) ? true : false;
+            if (error && error != EXFULL) {
+                ofpbuf_uninit(&request);
+                //[Eelco]TODO: Error cleanup, see below
+                return error;
+            }
+        }
+        nl_msg_end_nested(&request, basic_offset);
 
-        id->prio = tc_get_major(tc->tcm_info);
-        id->handle = tc->tcm_handle;
-        ofpbuf_delete(reply);
-    }
+        VLOG_ERR("EC_DEBUG[%s():%u] pass %d, more_filters = %s",
+                 __func__, __LINE__, pass, more ? "true" : "false");
+
+        error = tc_transact(&request, &reply);
+        if (!error) {
+            struct tcmsg *tc =
+                ofpbuf_at_assert(reply, NLMSG_HDRLEN, sizeof *tc);
+
+            if (pass == 0) {
+                id->prio = tc_get_major(tc->tcm_info);
+                id->handle = tc->tcm_handle;
+            } else
+                id->multi_rule = true;
+            ofpbuf_delete(reply);
+            pass++;
+        } else {
+            //[Eelco]TODO: We need to handle failure of install, i.e.
+            //             cleanup already installed rules...
+            break;
+        }
+    } while (more);
+
+    //[Eelco]TODO: Make sure all installed rules are in HW and/or SW
 
     return error;
 }

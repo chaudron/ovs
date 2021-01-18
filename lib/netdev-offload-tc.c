@@ -925,7 +925,7 @@ parse_tc_flower_to_match(struct tc_flower *flower,
                 size_t act_offset = nl_msg_start_nested(
                     buf, OVS_DEC_TTL_ATTR_ACTION);
 
-                //EELCO TODO: Here we need some new action that say's skip TC or something
+                //[Eelco]TODO: Here we need some new action that say's skip TC or something
                 nl_msg_put_unspec(buf, OVS_ACTION_ATTR_USERSPACE, NULL, 0);
 
                 nl_msg_end_nested(buf, act_offset);
@@ -967,9 +967,11 @@ netdev_tc_flow_dump_next(struct netdev_flow_dump *dump,
     while (nl_dump_next(dump->nl_dump, &nl_flow, rbuffer)) {
         struct tc_flower flower;
 
-        if (parse_netlink_to_tc_flower(&nl_flow, &id, &flower, dump->terse)) {
+        if (parse_netlink_to_tc_flower(&nl_flow, &id, &flower, dump->terse, false)) {
             continue;
         }
+
+        check_and_add_multi_rule_actions(&id, &flower);
 
         if (parse_tc_flower_to_match(&flower, match, actions, stats, attrs,
                                      wbuffer, dump->terse)) {
@@ -1419,6 +1421,23 @@ flower_match_to_tun_opt(struct tc_flower *flower, const struct flow_tnl *tnl,
     flower->mask.tunnel.metadata.present.len = tnl->metadata.present.len;
 }
 
+bool
+tc_is_multi_rule_recird_id(uint32_t id)
+{
+    return (id & 0x0fff0000) == 0xfff0000;
+}
+
+static int
+tc_get_multi_rule_recird_id(void)
+{
+    static uint32_t r_id = 0x0fff0000;
+    //[Eelco]TODO: How to do this and not cause issues with OVS recirc IDs
+    // The goto chain is only 28 bits, so this would be an existing issue if
+    // recirc ID is > 28bits :(
+
+    return r_id++;
+}
+
 static int
 netdev_tc_flow_put(struct netdev *netdev, struct match *match,
                    struct nlattr *actions, size_t actions_len,
@@ -1812,6 +1831,8 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
         } else if (nl_attr_type(nla) == OVS_ACTION_ATTR_DEC_TTL) {
             action->type = TC_ACT_DEC_TTL;
             action->dec_ttl.dl_type = ntohs(get_dl_type(key));
+            action->dec_ttl.chain = tc_get_multi_rule_recird_id();
+            //[Eelco]TODO: add error check
             flower.action_count++;
             if (++dec_ttl > 1) {
                 VLOG_DBG_RL(&rl,
@@ -1847,6 +1868,10 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
 
     block_id = get_block_id_from_netdev(netdev);
     id = tc_make_tcf_id_chain(ifindex, block_id, chain, prio, hook);
+
+    //[Eelco]TODO: Rather than do the split in tc_replace_flower() it
+    //             might be more cleaner to do it here, and build a list
+    //             of id/flower and add those.
     err = tc_replace_flower(&id, &flower);
     if (!err) {
         if (stats) {
@@ -1891,6 +1916,8 @@ netdev_tc_flow_get(struct netdev *netdev,
 
     in_port = netdev_ifindex_to_odp_port(id.ifindex);
     parse_tc_flower_to_match(&flower, match, actions, stats, attrs, buf, false);
+    //[Eelco]TODO: Make sure this returns the whole set of actions..
+
 
     match->wc.masks.in_port.odp_port = u32_to_odp(UINT32_MAX);
     match->flow.in_port.odp_port = in_port;

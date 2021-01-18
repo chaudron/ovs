@@ -23,6 +23,7 @@
 #include <linux/pkt_cls.h>
 #include <linux/pkt_sched.h>
 
+#include "netdev-provider.h"
 #include "netlink-socket.h"
 #include "odp-netlink.h"
 #include "openvswitch/ofpbuf.h"
@@ -48,6 +49,8 @@
 enum tc_flower_reserved_prio {
     TC_RESERVED_PRIORITY_NONE,
     TC_RESERVED_PRIORITY_POLICE,
+    TC_RESERVED_PRIORITY_DEC_TTL_IPV4,
+    TC_RESERVED_PRIORITY_DEC_TTL_IPV6,
     __TC_RESERVED_PRIORITY_MAX
 };
 #define TC_RESERVED_PRIORITY_MAX (__TC_RESERVED_PRIORITY_MAX -1)
@@ -256,6 +259,7 @@ struct tc_action {
         } ct;
         struct {
             ovs_be16 dl_type;
+            int      chain;
         } dec_ttl;
      };
 
@@ -277,6 +281,9 @@ struct tcf_id {
     uint32_t chain;
     uint16_t prio;
     uint32_t handle;
+
+    /* State information stored with the id */
+    bool multi_rule;
 };
 
 static inline struct tcf_id
@@ -353,6 +360,12 @@ struct tc_flower {
     enum tc_offload_policy tc_policy;
 };
 
+enum tc_pass_stage {
+    TC_STAGE_NONE = 0,
+    TC_STAGE_DEC_TTL_EXCEPTION,
+    TC_STAGE_DEC_TTL_EXECUTE
+};
+
 /* assert that if we overflow with a masked write of uint32_t to the last byte
  * of flower.rewrite we overflow inside struct flower.
  * shouldn't happen unless someone moves rewrite to the end of flower */
@@ -364,10 +377,15 @@ int tc_replace_flower(struct tcf_id *id, struct tc_flower *flower);
 int tc_del_filter(struct tcf_id *id);
 int tc_get_flower(struct tcf_id *id, struct tc_flower *flower);
 int tc_dump_flower_start(struct tcf_id *id, struct nl_dump *dump, bool terse);
-int parse_netlink_to_tc_flower(struct ofpbuf *reply,
+int
+parse_netlink_to_tc_flower(struct ofpbuf *reply,
                                struct tcf_id *id,
                                struct tc_flower *flower,
-                               bool terse);
+                               bool terse,
+                               bool parse_multi_flows);
 void tc_set_policy(const char *policy);
+bool tc_is_multi_rule_recird_id(uint32_t id);
+void check_and_add_multi_rule_actions(struct tcf_id *flower_id,
+                                      struct tc_flower *flower);
 
 #endif /* tc.h */
