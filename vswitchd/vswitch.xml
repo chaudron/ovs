@@ -5926,6 +5926,11 @@ ovs-vsctl add-port br0 p0 -- set Interface p0 type=patch options:peer=p1 \
         <ref column="other-config" key="lb-output-action"/> in
         <ref table="Port"/> table.
       </column>
+      <column name="capabilities" key="dec_ttl_action"
+              type='{"type": "boolean"}'>
+        If this is true, then the datapath supports the dec_ttl action,
+        specifically OVS_ACTION_ATTR_DEC_TTL.
+      </column>
       <group title="Connection-Tracking Capabilities">
         <p>
           These capabilities are granular because Open vSwitch and its

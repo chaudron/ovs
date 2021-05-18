@@ -143,8 +143,10 @@ odp_action_len(uint16_t type)
     case OVS_ACTION_ATTR_POP_NSH: return 0;
     case OVS_ACTION_ATTR_CHECK_PKT_LEN: return ATTR_LEN_VARIABLE;
     case OVS_ACTION_ATTR_DROP: return sizeof(uint32_t);
+    case OVS_ACTION_ATTR_DEC_TTL: return ATTR_LEN_VARIABLE;
 
     case OVS_ACTION_ATTR_UNSPEC:
+    case OVS_ACTION_ATTR_ADD_MPLS:
     case __OVS_ACTION_ATTR_MAX:
         return ATTR_LEN_INVALID;
     }
@@ -1111,6 +1113,25 @@ format_odp_check_pkt_len_action(struct ds *ds, const struct nlattr *attr,
 }
 
 static void
+format_dec_ttl_action(struct ds *ds, const struct nlattr *attr,
+                      const struct hmap *portno_names)
+{
+    const struct nlattr *a;
+    unsigned int left;
+
+    ds_put_cstr(ds,"dec_ttl(le_1(");
+    NL_ATTR_FOR_EACH (a, left,
+                      nl_attr_get(attr), nl_attr_get_size(attr)) {
+        if (nl_attr_type(a) == OVS_DEC_TTL_ATTR_ACTION) {
+           format_odp_actions(ds, nl_attr_get(a),
+                              nl_attr_get_size(a), portno_names);
+           break;
+        }
+    }
+    ds_put_format(ds, "))");
+}
+
+static void
 format_odp_action(struct ds *ds, const struct nlattr *a,
                   const struct hmap *portno_names)
 {
@@ -1257,7 +1278,11 @@ format_odp_action(struct ds *ds, const struct nlattr *a,
     case OVS_ACTION_ATTR_DROP:
         ds_put_cstr(ds, "drop");
         break;
+    case OVS_ACTION_ATTR_DEC_TTL:
+        format_dec_ttl_action(ds, a, portno_names);
+        break;
     case OVS_ACTION_ATTR_UNSPEC:
+    case OVS_ACTION_ATTR_ADD_MPLS:
     case __OVS_ACTION_ATTR_MAX:
     default:
         format_generic_odp_action(ds, a);
@@ -2503,6 +2528,30 @@ parse_odp_action__(struct parse_odp_context *context, const char *s,
             n += retval;
             nl_msg_end_nested(actions, actions_ofs);
             return n + 1;
+        }
+    }
+    {
+        if (!strncmp(s, "dec_ttl(le_1(", 13)) {
+            size_t actions_ofs, ofs;
+            int n = 13;
+
+            ofs = nl_msg_start_nested(actions, OVS_ACTION_ATTR_DEC_TTL);
+            actions_ofs = nl_msg_start_nested(actions,
+                                              OVS_DEC_TTL_ATTR_ACTION);
+
+            if (!strncasecmp(s + n, "drop", 4)) {
+                n += 4;
+            } else {
+                int retval = parse_action_list(context, s + n, actions);
+                if (retval < 0) {
+                    return retval;
+                }
+                n += retval;
+            }
+
+            nl_msg_end_nested(actions, actions_ofs);
+            nl_msg_end_nested(actions, ofs);
+            return s[n + 1] == ')' ? n + 2 : -EINVAL;
         }
     }
 

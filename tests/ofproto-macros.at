@@ -134,6 +134,18 @@ strip_ufid () {
     sed 's/mega_ufid:[[-0-9a-f]]* //
     s/ufid:[[-0-9a-f]]* //'
 }
+
+# Changes all 'recir(0x..)' to say 'recirc=(?)' to make output easier to compare.
+strip_recirc () {
+    sed 's/recirc(0x[[0-9a-f]]*)/recirc(?)/'
+}
+
+# Changes all 'recirc_id(0x..)' to say 'recirc_id(?)' to make output easier to compare.
+# Note that it does NOT change recirc_id(0)
+strip_recirc_id () {
+    sed 's/recirc_id(0x[[0-9a-f]]*)/recirc_id(?)/'
+}
+
 m4_divert_pop([PREPARE_TESTS])
 
 m4_define([TESTABLE_LOG], [-vPATTERN:ANY:'%c|%p|%m'])
@@ -319,6 +331,18 @@ m4_define([OVS_VSWITCHD_STOP],
 
 m4_define([OVS_VSWITCHD_DISABLE_TUNNEL_PUSH_POP],
   [AT_CHECK([ovs-appctl dpif/set-dp-features br0 tnl_push_pop false], [0])
+])
+
+m4_define([OVS_VSWITCHD_DISABLE_DEC_TTL_ACTION],
+  [AT_CHECK([ovs-appctl dpif/set-dp-features $1 dec_ttl_action false], [0])
+])
+
+m4_define([OVS_SET_CONDITIONAL_OUTPUT],
+    if $1; then
+        ovs_conditional_output=$2
+    else
+        ovs_conditional_output=$3
+   fi;
 ])
 
 # WAIT_FOR_DUMMY_PORTS(NETDEV_DUMMY_PORT[, NETDEV_DUMMY_PORT...])

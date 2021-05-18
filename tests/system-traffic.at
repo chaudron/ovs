@@ -1454,6 +1454,34 @@ AT_CHECK([ovs-ofctl dump-flows br0 | grep "in_port=4" | ofctl_strip], [0], [dnl
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
+AT_SETUP([datapath - dec_ttl action])
+OVS_TRAFFIC_VSWITCHD_START()
+
+AT_CHECK([ovs-ofctl add-flow br0 "actions=normal"])
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/24")
+
+AT_CHECK([ovs-vsctl -- set interface ovs-p0 ofport_request=1 \
+                    -- set interface ovs-p1 ofport_request=2])
+
+AT_CHECK([ovs-ofctl del-flows br0])
+AT_CHECK([ovs-ofctl add-flow br0 in_port=1,action=dec_ttl,2])
+AT_CHECK([ovs-ofctl add-flow br0 in_port=2,action=dec_ttl,1])
+
+NS_CHECK_EXEC([at_ns0], [ping -c 1 -w 2 10.1.1.2 | grep -o -E 'ttl=[[[:digit:]]]+'], [0], [dnl
+ttl=63
+])
+
+NS_CHECK_EXEC([at_ns0], [ping -q -c 1 -t 1 10.1.1.2 | FORMAT_PING], [0], [dnl
+1 packets transmitted, 0 received, 100% packet loss, time 0ms
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
 AT_BANNER([conntrack])
 
 AT_SETUP([conntrack - controller])

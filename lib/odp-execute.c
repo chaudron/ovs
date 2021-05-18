@@ -719,6 +719,56 @@ odp_execute_sample(void *dp, struct dp_packet *packet, bool steal,
                         nl_attr_get_size(subactions), dp_execute_action);
 }
 
+static bool
+execute_dec_ttl(struct dp_packet *packet)
+{
+    struct eth_header *eth = dp_packet_eth(packet);
+
+    if (dl_type_is_ipv4(eth->eth_type)) {
+        struct ip_header *nh = dp_packet_l3(packet);
+        uint8_t old_ttl = nh->ip_ttl;
+
+        if (old_ttl <= 1) {
+            return true;
+        }
+
+        nh->ip_ttl--;
+        nh->ip_csum = recalc_csum16(nh->ip_csum, htons(old_ttl << 8),
+                                    htons(nh->ip_ttl << 8));
+    } else if (dl_type_is_ipv6(eth->eth_type)) {
+        struct ovs_16aligned_ip6_hdr *nh = dp_packet_l3(packet);
+
+        if (nh->ip6_hlim <= 1) {
+            return true;
+        }
+
+        nh->ip6_hlim--;
+    }
+
+    return false;
+}
+
+static void
+odp_dec_ttl_exception_handler(void *dp, bool steal,
+                              struct dp_packet_batch *batch,
+                              const struct nlattr *action,
+                              odp_execute_cb dp_execute_action)
+{
+    static const struct nl_policy dec_ttl_policy[] = {
+        [OVS_DEC_TTL_ATTR_ACTION] = { .type = NL_A_NESTED },
+    };
+    struct nlattr *attrs[ARRAY_SIZE(dec_ttl_policy)];
+
+    ovs_assert(nl_parse_nested(action, dec_ttl_policy, attrs,
+                               ARRAY_SIZE(attrs))
+               && attrs[OVS_DEC_TTL_ATTR_ACTION]);
+
+    odp_execute_actions(dp, batch, steal,
+                        nl_attr_get(attrs[OVS_DEC_TTL_ATTR_ACTION]),
+                        nl_attr_get_size(attrs[OVS_DEC_TTL_ATTR_ACTION]),
+                        dp_execute_action);
+}
+
 static void
 odp_execute_clone(void *dp, struct dp_packet_batch *batch, bool steal,
                    const struct nlattr *actions,
@@ -734,7 +784,7 @@ odp_execute_clone(void *dp, struct dp_packet_batch *batch, bool steal,
         dp_packet_batch_clone(&clone_pkt_batch, batch);
         dp_packet_batch_reset_cutlen(batch);
         odp_execute_actions(dp, &clone_pkt_batch, true, nl_attr_get(actions),
-                        nl_attr_get_size(actions), dp_execute_action);
+                            nl_attr_get_size(actions), dp_execute_action);
     }
     else {
         odp_execute_actions(dp, batch, true, nl_attr_get(actions),
@@ -820,6 +870,8 @@ requires_datapath_assistance(const struct nlattr *a)
     case OVS_ACTION_ATTR_CT_CLEAR:
     case OVS_ACTION_ATTR_CHECK_PKT_LEN:
     case OVS_ACTION_ATTR_DROP:
+    case OVS_ACTION_ATTR_ADD_MPLS:
+    case OVS_ACTION_ATTR_DEC_TTL:
         return false;
 
     case OVS_ACTION_ATTR_UNSPEC:
@@ -979,6 +1031,39 @@ odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
             }
             break;
 
+        case OVS_ACTION_ATTR_DEC_TTL: {
+            const size_t cnt = dp_packet_batch_size(batch);
+            struct dp_packet_batch invalid_ttl;
+            size_t i;
+
+            /* Make batch for invalid ttl packets. */
+            dp_packet_batch_init(&invalid_ttl);
+            invalid_ttl.trunc = batch->trunc;
+
+            /* Add packets with ttl <=1 to the invalid_ttl batch
+             * and remove it from the batch. */
+            DP_PACKET_BATCH_REFILL_FOR_EACH (i, cnt, packet, batch) {
+                if (execute_dec_ttl(packet)) {
+                    dp_packet_batch_add(&invalid_ttl, packet);
+                } else {
+                    dp_packet_batch_refill(batch, packet, i);
+                }
+            }
+
+            /* Execute action on packets with ttl <= 1. */
+            if (!dp_packet_batch_is_empty(&invalid_ttl)) {
+                odp_dec_ttl_exception_handler(dp, steal, &invalid_ttl, a,
+                                              dp_execute_action);
+            }
+
+            if (dp_packet_batch_is_empty(batch)) {
+                /* The entire batch was handled as an exception, so we can
+                 * stop processing actions. */
+                return;
+            }
+            break;
+        }
+
         case OVS_ACTION_ATTR_TRUNC: {
             const struct ovs_action_trunc *trunc =
                         nl_attr_get_unspec(a, sizeof *trunc);
@@ -1077,6 +1162,7 @@ odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
         case OVS_ACTION_ATTR_RECIRC:
         case OVS_ACTION_ATTR_CT:
         case OVS_ACTION_ATTR_UNSPEC:
+        case OVS_ACTION_ATTR_ADD_MPLS:
         case __OVS_ACTION_ATTR_MAX:
             OVS_NOT_REACHED();
         }
