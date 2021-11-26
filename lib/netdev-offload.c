@@ -780,7 +780,7 @@ netdev_ports_flow_init(void)
 void
 netdev_set_flow_api_enabled(const struct smap *ovs_other_config)
 {
-    if (smap_get_bool(ovs_other_config, "hw-offload", false)) {
+    if (smap_get_bool(ovs_other_config, "hw-offload", true)) {
         static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
 
         if (ovsthread_once_start(&once)) {

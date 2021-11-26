@@ -160,7 +160,7 @@ m4_define([_OVS_VSWITCHD_START],
    AT_CHECK([ovs-vsctl --no-wait init $2])
 
    dnl Start ovs-vswitchd.
-   AT_CHECK([ovs-vswitchd $1 --detach --no-chdir --pidfile --log-file -vvconn -vofproto_dpif -vunixctl], [0], [], [stderr])
+   AT_CHECK([ovs-vswitchd $1 --detach --no-chdir --pidfile --log-file -vvconn -vofproto_dpif -vunixctl -vdpif_netlink -vtc -vnetdev_offload_tc], [0], [], [stderr])
    AT_CAPTURE_FILE([ovs-vswitchd.log])
    on_exit "kill_ovs_vswitchd `cat ovs-vswitchd.pid`"
    AT_CHECK([[sed < stderr '
@@ -174,6 +174,7 @@ m4_define([_OVS_VSWITCHD_START],
 /ofproto|INFO|datapath ID changed to fedcba9876543210/d
 /dpdk|INFO|DPDK Disabled - Use other_config:dpdk-init to enable/d
 /netlink_socket|INFO|netlink: could not enable listening to all nsid/d
+/netdev_offload|INFO|netdev: Flow API Enabled/d
 /probe tc:/d
 /tc: Using policy/d']])
 ])
