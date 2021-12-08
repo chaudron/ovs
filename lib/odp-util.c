@@ -7161,12 +7161,12 @@ parse_l2_5_onward(const struct nlattr *attrs[OVS_KEY_ATTR_MAX + 1],
                 }
             }
         }
-    } else if (src_flow->nw_proto == IPPROTO_IGMP
-               && src_flow->dl_type == htons(ETH_TYPE_IP)) {
-        /* OVS userspace parses the IGMP type, code, and group, but its
-         * datapaths do not, so there is always missing information. */
-        return ODP_FIT_TOO_LITTLE;
-    }
+    } //else if (src_flow->nw_proto == IPPROTO_IGMP
+      //         && src_flow->dl_type == htons(ETH_TYPE_IP)) {
+      //  /* OVS userspace parses the IGMP type, code, and group, but its
+      //   * datapaths do not, so there is always missing information. */
+      //  return ODP_FIT_TOO_LITTLE;
+    //   }
     if (is_mask && expected_bit != OVS_KEY_ATTR_UNSPEC) {
         if ((flow->tp_src || flow->tp_dst) && flow->nw_proto != 0xff) {
             odp_parse_error(&rl, errorp, "flow matches on L4 ports but does "
@@ -7553,7 +7553,8 @@ parse_key_and_mask_to_match(const struct nlattr *key, size_t key_len,
 
             ds_init(&s);
             odp_flow_format(key, key_len, NULL, 0, NULL, &s, true);
-            VLOG_ERR("internal error parsing flow key %s", ds_cstr(&s));
+            VLOG_ERR("internal error parsing flow key %s (%s)",
+                     ds_cstr(&s), odp_key_fitness_to_string(fitness));
             ds_destroy(&s);
         }
 
