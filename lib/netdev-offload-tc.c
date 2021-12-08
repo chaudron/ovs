@@ -1842,6 +1842,15 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
                 return ENODEV;
             }
             action->out.ifindex_out = netdev_get_ifindex(outdev);
+
+            if (action->out.ifindex_out < 0) {
+                VLOG_DBG_RL(&rl,
+                            "Can't find ifindex for output port %s, error %d",
+                            netdev_get_name(outdev), action->out.ifindex_out);
+
+                return -action->out.ifindex_out;
+            }
+
             action->out.ingress = is_internal_port(netdev_get_type(outdev));
             action->type = TC_ACT_OUTPUT;
             flower.action_count++;
