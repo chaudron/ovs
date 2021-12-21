@@ -1300,8 +1300,13 @@ AT_CHECK([dd if=/dev/urandom of=payload200.bin bs=200 count=1 2> /dev/null])
 on_exit 'rm -f payload200.bin'
 NS_CHECK_EXEC([at_ns0], [nc $NC_EOF_OPT -u 10.1.1.2 1234 < payload200.bin])
 
+dnl Add a short delay here to make sure the datapath rule is programmed
+dnl (especially in the TC case) before we purge the dp flows.
+sleep 1
+
 dnl packet with truncated size
 AT_CHECK([ovs-appctl revalidator/purge], [0])
+
 AT_CHECK([ovs-ofctl dump-flows br0 table=0 | grep "in_port=3" |  sed -n 's/.*\(n\_bytes=[[0-9]]*\).*/\1/p'], [0], [dnl
 n_bytes=100
 ])
@@ -1321,6 +1326,7 @@ in_port=1 dl_dst=e6:66:c1:22:22:22 actions=output(port=2,max_len=100),output:4,o
 AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
 
 NS_CHECK_EXEC([at_ns0], [nc $NC_EOF_OPT -u 10.1.1.2 1234 < payload200.bin])
+sleep 1
 
 dnl 100 + 100 + 242 + min(65535,242) = 684
 AT_CHECK([ovs-appctl revalidator/purge], [0])
@@ -1351,6 +1357,7 @@ dnl SLOW_ACTION test2: check actual packet truncate
 AT_CHECK([ovs-ofctl del-flows br0])
 AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
 NS_CHECK_EXEC([at_ns0], [nc $NC_EOF_OPT -u 10.1.1.2 1234 < payload200.bin])
+sleep 1
 
 dnl 100 + 100 + 242 + min(65535,242) = 684
 AT_CHECK([ovs-appctl revalidator/purge], [0])
@@ -2957,6 +2964,10 @@ AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
 
 dnl UDP packets from ns0->ns1 should solicit "destination unreachable" response.
 NS_CHECK_EXEC([at_ns0], [bash -c "echo a | nc $NC_EOF_OPT -u 10.1.1.2 10000"])
+
+dnl Add a short delay here to make sure the datapath rule is programmed
+dnl (especially in the TC case) before we purge the dp flows.
+sleep 1
 
 AT_CHECK([ovs-appctl revalidator/purge], [0])
 AT_CHECK([ovs-ofctl dump-flows br0 | ofctl_strip | sort | grep -v drop], [0], [dnl
