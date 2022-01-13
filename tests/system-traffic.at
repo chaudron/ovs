@@ -6554,16 +6554,17 @@ AT_CHECK([ovs-ofctl --bundle add-flows br0 flows.txt])
 
 dnl non-FIP case
 NS_CHECK_EXEC([at_ns1], [echo "foobar" |nc $NC_EOF_OPT 10.1.1.1 1234])
-OVS_WAIT_UNTIL([[ovs-appctl dpctl/dump-conntrack | sed -e 's/port=[0-9]*/port=<cleared>/g' -e 's/id=[0-9]*/id=<cleared>/g' |
+OVS_WAIT_UNTIL([[ovs-appctl dpctl/dump-conntrack | sed -e 's/port=[0-9]*/port=<cleared>/g' -e 's/id=[0-9]*/id=<cleared>/g' -e 's/CLOSE_WAIT\|CLOSING/TIME_WAIT/g' |
 grep "tcp,orig=(src=10.1.1.2,dst=10.1.1.1,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),protoinfo=(state=TIME_WAIT)"
 ]])
 
-dnl Check that the full session ends as expected (i.e. TIME_WAIT). Otherwise it
-dnl means the datapath didn't process the ct_clear action. Ending in SYN_RECV
-dnl (OVS maps to ESTABLISHED) means the initial frame was committed, but not a
-dnl second time after the FIP translation (because ct_clear didn't occur).
+dnl Check that the full session ends as expected (i.e. TIME_WAIT, CLOSE_WAIT).
+dnl Otherwise it means the datapath didn't process the ct_clear action. Ending
+dnl in SYN_RECV (OVS maps to ESTABLISHED) means the initial frame was
+dnl committed, but not a second time after the FIP translation (because
+dnl ct_clear didn't occur).
 NS_CHECK_EXEC([at_ns1], [echo "foobar" |nc $NC_EOF_OPT 10.254.254.1 1234])
-OVS_WAIT_UNTIL([[ovs-appctl dpctl/dump-conntrack | sed -e 's/port=[0-9]*/port=<cleared>/g' -e 's/id=[0-9]*/id=<cleared>/g' |
+OVS_WAIT_UNTIL([[ovs-appctl dpctl/dump-conntrack | sed -e 's/port=[0-9]*/port=<cleared>/g' -e 's/id=[0-9]*/id=<cleared>/g' -e 's/CLOSE_WAIT\|CLOSING/TIME_WAIT/g' |
 grep "tcp,orig=(src=10.254.254.2,dst=10.1.1.1,sport=<cleared>,dport=<cleared>),reply=(src=10.1.1.1,dst=10.254.254.2,sport=<cleared>,dport=<cleared>),protoinfo=(state=TIME_WAIT)"
 ]])
 
