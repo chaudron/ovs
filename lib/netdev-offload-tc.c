@@ -1478,14 +1478,14 @@ flower_match_to_tun_opt(struct tc_flower *flower, const struct flow_tnl *tnl,
     flower->mask.tunnel.metadata.present.len = tnl->metadata.present.len;
 }
 
-static void
+static int
 parse_match_ct_state_to_flower(struct tc_flower *flower, struct match *match)
 {
     const struct flow *key = &match->flow;
     struct flow *mask = &match->wc.masks;
 
     if (!ct_state_support) {
-        return;
+        return 0;
     }
 
     if ((ct_state_support & mask->ct_state) == mask->ct_state) {
@@ -1541,6 +1541,13 @@ parse_match_ct_state_to_flower(struct tc_flower *flower, struct match *match)
             flower->key.ct_state &= ~(TCA_FLOWER_KEY_CT_FLAGS_NEW);
             flower->mask.ct_state &= ~(TCA_FLOWER_KEY_CT_FLAGS_NEW);
         }
+
+        if (flower->key.ct_state &&
+            !(flower->key.ct_state & TCA_FLOWER_KEY_CT_FLAGS_TRACKED)) {
+            VLOG_INFO_ONCE("For ct_state match offload to work, you must "
+                           "include +trk with any other flags set!");
+            return EOPNOTSUPP;
+        }
     }
 
     if (mask->ct_zone) {
@@ -1560,6 +1567,8 @@ parse_match_ct_state_to_flower(struct tc_flower *flower, struct match *match)
         flower->mask.ct_label = mask->ct_label;
         mask->ct_label = OVS_U128_ZERO;
     }
+
+    return 0;
 }
 
 static int
@@ -1814,7 +1823,10 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
         }
     }
 
-    parse_match_ct_state_to_flower(&flower, match);
+    err = parse_match_ct_state_to_flower(&flower, match);
+    if (err) {
+        return err;
+    }
 
     /* ignore exact match on skb_mark of 0. */
     if (mask->pkt_mark == UINT32_MAX && !key->pkt_mark) {
