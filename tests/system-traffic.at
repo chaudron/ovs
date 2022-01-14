@@ -2634,7 +2634,9 @@ tcp,orig=(src=10.1.1.1,dst=10.1.1.2,sport=<cleared>,dport=<cleared>),reply=(src=
 
 OVS_TRAFFIC_VSWITCHD_STOP(["dnl
 /ioctl(SIOCGIFINDEX) on .* device failed: No such device/d
-/removing policing failed: No such device/d"])
+/removing policing failed: No such device/d
+/dump_create: failed to get ifindex for .*: Operation not supported/d
+/flow_put: failed to get ifindex for .*: Operation not supported"/d])
 AT_CLEANUP
 
 AT_SETUP([conntrack - ct_mark])
