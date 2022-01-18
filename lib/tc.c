@@ -994,12 +994,35 @@ nl_parse_flower_flags(struct nlattr **attrs, struct tc_flower *flower)
     flower->offloaded_state = nl_get_flower_offloaded_state(attrs);
 }
 
+static int
+get_user_hz(void)
+{
+    static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
+    static int user_hz = 100;
+
+    if (ovsthread_once_start(&once)) {
+        user_hz = sysconf(_SC_CLK_TCK);
+        ovsthread_once_done(&once);
+    }
+
+    return user_hz;
+}
+
+static void
+nl_parse_tcf(const struct tcf_t *tm, struct tc_flower *flower)
+{
+    flower->lastused = time_msec() - (tm->lastuse * 1000 / get_user_hz());
+}
+
 static const struct nl_policy pedit_policy[] = {
-            [TCA_PEDIT_PARMS_EX] = { .type = NL_A_UNSPEC,
-                                     .min_len = sizeof(struct tc_pedit),
-                                     .optional = false, },
-            [TCA_PEDIT_KEYS_EX]   = { .type = NL_A_NESTED,
-                                      .optional = false, },
+    [TCA_PEDIT_TM] = { .type = NL_A_UNSPEC,
+                       .min_len = sizeof(struct tcf_t),
+                       .optional = false, },
+    [TCA_PEDIT_PARMS_EX] = { .type = NL_A_UNSPEC,
+                             .min_len = sizeof(struct tc_pedit),
+                             .optional = false, },
+    [TCA_PEDIT_KEYS_EX] = { .type = NL_A_NESTED,
+                            .optional = false, },
 };
 
 static int
@@ -1094,6 +1117,9 @@ nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
     action = &flower->actions[flower->action_count++];
     action->type = TC_ACT_PEDIT;
 
+    nl_parse_tcf(nl_attr_get_unspec(pe_attrs[TCA_PEDIT_TM],
+                                    sizeof(struct tcf_t)),
+                 flower);
     return 0;
 }
 
@@ -1101,6 +1127,9 @@ static const struct nl_policy tunnel_key_policy[] = {
     [TCA_TUNNEL_KEY_PARMS] = { .type = NL_A_UNSPEC,
                                .min_len = sizeof(struct tc_tunnel_key),
                                .optional = false, },
+    [TCA_TUNNEL_KEY_TM] = { .type = NL_A_UNSPEC,
+                            .min_len = sizeof(struct tcf_t),
+                            .optional = false, },
     [TCA_TUNNEL_KEY_ENC_IPV4_SRC] = { .type = NL_A_U32, .optional = true, },
     [TCA_TUNNEL_KEY_ENC_IPV4_DST] = { .type = NL_A_U32, .optional = true, },
     [TCA_TUNNEL_KEY_ENC_IPV6_SRC] = { .type = NL_A_UNSPEC,
@@ -1275,6 +1304,10 @@ nl_parse_act_tunnel_key(struct nlattr *options, struct tc_flower *flower)
                     tun->action, tun->t_action);
         return EINVAL;
     }
+
+    nl_parse_tcf(nl_attr_get_unspec(tun_attrs[TCA_TUNNEL_KEY_TM],
+                                    sizeof(struct tcf_t)),
+                 flower);
     return 0;
 }
 
@@ -1286,26 +1319,6 @@ static const struct nl_policy gact_policy[] = {
                       .min_len = sizeof(struct tcf_t),
                       .optional = false, },
 };
-
-static int
-get_user_hz(void)
-{
-    static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
-    static int user_hz = 100;
-
-    if (ovsthread_once_start(&once)) {
-        user_hz = sysconf(_SC_CLK_TCK);
-        ovsthread_once_done(&once);
-    }
-
-    return user_hz;
-}
-
-static void
-nl_parse_tcf(const struct tcf_t *tm, struct tc_flower *flower)
-{
-    flower->lastused = time_msec() - (tm->lastuse * 1000 / get_user_hz());
-}
 
 static int
 nl_parse_act_gact(struct nlattr *options, struct tc_flower *flower)
@@ -1394,18 +1407,21 @@ nl_parse_act_mirred(struct nlattr *options, struct tc_flower *flower)
 
 static const struct nl_policy ct_policy[] = {
     [TCA_CT_PARMS] = { .type = NL_A_UNSPEC,
-                              .min_len = sizeof(struct tc_ct),
-                              .optional = false, },
+                       .min_len = sizeof(struct tc_ct),
+                       .optional = false, },
+    [TCA_CT_TM] = { .type = NL_A_UNSPEC,
+                    .min_len = sizeof(struct tcf_t),
+                    .optional = false, },
     [TCA_CT_ACTION] = { .type = NL_A_U16,
-                         .optional = true, },
+                        .optional = true, },
     [TCA_CT_ZONE] = { .type = NL_A_U16,
                       .optional = true, },
     [TCA_CT_MARK] = { .type = NL_A_U32,
                        .optional = true, },
     [TCA_CT_MARK_MASK] = { .type = NL_A_U32,
-                            .optional = true, },
+                           .optional = true, },
     [TCA_CT_LABELS] = { .type = NL_A_UNSPEC,
-                         .optional = true, },
+                        .optional = true, },
     [TCA_CT_LABELS_MASK] = { .type = NL_A_UNSPEC,
                               .optional = true, },
     [TCA_CT_NAT_IPV4_MIN] = { .type = NL_A_U32,
@@ -1517,6 +1533,9 @@ nl_parse_act_ct(struct nlattr *options, struct tc_flower *flower)
     }
     action->type = TC_ACT_CT;
 
+    nl_parse_tcf(nl_attr_get_unspec(ct_attrs[TCA_CT_TM],
+                                    sizeof(struct tcf_t)),
+                 flower);
     return 0;
 }
 
@@ -1524,6 +1543,9 @@ static const struct nl_policy vlan_policy[] = {
     [TCA_VLAN_PARMS] = { .type = NL_A_UNSPEC,
                          .min_len = sizeof(struct tc_vlan),
                          .optional = false, },
+    [TCA_VLAN_TM] = { .type = NL_A_UNSPEC,
+                      .min_len = sizeof(struct tcf_t),
+                      .optional = false, },
     [TCA_VLAN_PUSH_VLAN_ID] = { .type = NL_A_U16, .optional = true, },
     [TCA_VLAN_PUSH_VLAN_PROTOCOL] = { .type = NL_A_U16, .optional = true, },
     [TCA_VLAN_PUSH_VLAN_PRIORITY] = { .type = NL_A_U8, .optional = true, },
@@ -1562,6 +1584,10 @@ nl_parse_act_vlan(struct nlattr *options, struct tc_flower *flower)
                     v->action, v->v_action);
         return EINVAL;
     }
+
+    nl_parse_tcf(nl_attr_get_unspec(vlan_attrs[TCA_VLAN_TM],
+                                    sizeof(struct tcf_t)),
+                 flower);
     return 0;
 }
 
@@ -1569,6 +1595,9 @@ static const struct nl_policy mpls_policy[] = {
     [TCA_MPLS_PARMS] = { .type = NL_A_UNSPEC,
                          .min_len = sizeof(struct tc_mpls),
                          .optional = false, },
+    [TCA_MPLS_TM] = { .type = NL_A_UNSPEC,
+                      .min_len = sizeof(struct tcf_t),
+                      .optional = false, },
     [TCA_MPLS_PROTO] = { .type = NL_A_U16, .optional = true, },
     [TCA_MPLS_LABEL] = { .type = NL_A_U32, .optional = true, },
     [TCA_MPLS_TC] = { .type = NL_A_U8, .optional = true, },
@@ -1655,6 +1684,9 @@ nl_parse_act_mpls(struct nlattr *options, struct tc_flower *flower)
         return EINVAL;
     }
 
+    nl_parse_tcf(nl_attr_get_unspec(mpls_attrs[TCA_MPLS_TM],
+                                    sizeof(struct tcf_t)),
+                 flower);
     return 0;
 }
 
@@ -1662,6 +1694,9 @@ static const struct nl_policy csum_policy[] = {
     [TCA_CSUM_PARMS] = { .type = NL_A_UNSPEC,
                          .min_len = sizeof(struct tc_csum),
                          .optional = false, },
+    [TCA_CSUM_TM] = { .type = NL_A_UNSPEC,
+                      .min_len = sizeof(struct tcf_t),
+                      .optional = false, },
 };
 
 static int
@@ -1695,6 +1730,9 @@ nl_parse_act_csum(struct nlattr *options, struct tc_flower *flower)
         return EINVAL;
     }
 
+    nl_parse_tcf(nl_attr_get_unspec(csum_attrs[TCA_CSUM_TM],
+                                    sizeof(struct tcf_t)),
+                 flower);
     return 0;
 }
 
@@ -1713,7 +1751,7 @@ static const struct nl_policy stats_policy[] = {
 
 static int
 nl_parse_single_action(struct nlattr *action, struct tc_flower *flower,
-                       bool terse)
+                       bool terse, bool update_stats)
 {
     struct nlattr *act_options;
     struct nlattr *act_stats;
@@ -1779,7 +1817,7 @@ nl_parse_single_action(struct nlattr *action, struct tc_flower *flower,
     }
 
     bs = nl_attr_get_unspec(stats_attrs[TCA_STATS_BASIC], sizeof *bs);
-    if (bs->packets) {
+    if (bs->packets && update_stats) {
         put_32aligned_u64(&stats->n_packets, bs->packets);
         put_32aligned_u64(&stats->n_bytes, bs->bytes);
     }
@@ -1797,6 +1835,8 @@ nl_parse_flower_actions(struct nlattr **attrs, struct tc_flower *flower,
     static struct nl_policy actions_orders_policy[TCA_ACT_MAX_NUM + 1] = {};
     struct nlattr *actions_orders[ARRAY_SIZE(actions_orders_policy)];
     const int max_size = ARRAY_SIZE(actions_orders_policy);
+    bool first_action = true;
+    uint64_t lastused = 0;
 
     for (int i = TCA_ACT_MIN_PRIO; i < max_size; i++) {
         actions_orders_policy[i].type = NL_A_NESTED;
@@ -1817,13 +1857,26 @@ nl_parse_flower_actions(struct nlattr **attrs, struct tc_flower *flower,
                 VLOG_DBG_RL(&error_rl, "Can only support %d actions", TCA_ACT_MAX_NUM);
                 return EOPNOTSUPP;
             }
-            err = nl_parse_single_action(actions_orders[i], flower, terse);
+            err = nl_parse_single_action(actions_orders[i], flower, terse,
+                                         first_action);
 
             if (err) {
                 return err;
             }
+
+            if (first_action) {
+                /* We need to store the last used timestamp from the first
+                 * action, i.e., the action that was used the track the
+                 * statistics, as all remaining action decoding overwrite
+                 * this value. We also need to use the first actions statistics
+                 * as conditional actions can exist. */
+                lastused = flower->lastused;
+                first_action = false;
+            }
         }
     }
+
+    flower->lastused = lastused;
 
     if (flower->csum_update_flags) {
         VLOG_WARN_RL(&error_rl,
