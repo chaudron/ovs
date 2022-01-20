@@ -168,3 +168,116 @@ matchall
 ])
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
+
+
+AT_SETUP([offloads - check_pkt_len action - offloads disabled])
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_NAMESPACES(at_ns1, at_ns2, at_ns3, at_ns4)
+
+ADD_VETH(p1, at_ns1, br0, "10.1.1.1/24")
+ADD_VETH(p2, at_ns2, br0, "10.1.1.2/24")
+ADD_VETH(p3, at_ns3, br0, "10.1.1.3/24")
+ADD_VETH(p4, at_ns4, br0, "10.1.1.4/24")
+
+AT_DATA([flows.txt], [dnl
+table=0,in_port=2 actions=output:1
+table=0,in_port=1 actions=load:0x1->NXM_NX_REG1[[]],resubmit(,1),load:0x2->NXM_NX_REG1[[]],resubmit(,1)
+table=1,in_port=1,reg1=0x1 actions=check_pkt_larger(200)->NXM_NX_REG0[[0]],resubmit(,4)
+table=1,in_port=1,reg1=0x2 actions=output:2
+table=4,in_port=1,reg0=0x1 actions=output:3
+table=4,in_port=1,reg0=0x0 actions=output:4
+])
+AT_CHECK([ovs-ofctl --protocols=OpenFlow10 add-flows br0 flows.txt])
+
+NS_CHECK_EXEC([at_ns3], [tcpdump -l -n -U -i p3 dst 10.1.1.2 and icmp > p3.pcap &])
+NS_CHECK_EXEC([at_ns4], [tcpdump -l -n -U -i p4 dst 10.1.1.2 and icmp > p4.pcap &])
+sleep 1
+
+NS_CHECK_EXEC([at_ns1], [ping -q -c 10 -i 0.1 -w 2 -s 64 10.1.1.2 | FORMAT_PING], [0], [dnl
+10 packets transmitted, 10 received, 0% packet loss, time 0ms
+], [], [ovs-appctl dpctl/dump-flows; ovs-ofctl dump-flows br0])
+
+NS_CHECK_EXEC([at_ns1], [ping -q -c 10 -i 0.1 -w 2 -s 1024 10.1.1.2 | FORMAT_PING], [0], [dnl
+10 packets transmitted, 10 received, 0% packet loss, time 0ms
+], [], [ovs-appctl dpctl/dump-flows; ovs-ofctl dump-flows br0])
+
+AT_CHECK([ovs-appctl dpctl/dump-flows | grep "eth_type(0x0800)" | DUMP_CLEAN_SORTED], [0], [dnl
+in_port(2),eth(),eth_type(0x0800),ipv4(frag=no), packets:19, bytes:11614, used:0.001s, actions:outputcheck_pkt_len(size=200,gt(4),le(5)),3
+in_port(3),eth(),eth_type(0x0800),ipv4(frag=no), packets:19, bytes:11614, used:0.001s, actions:output
+])
+
+AT_CHECK([ovs-appctl dpctl/dump-flows type=ovs | grep "eth_type(0x0800)" | DUMP_CLEAN_SORTED], [0], [dnl
+in_port(2),eth(),eth_type(0x0800),ipv4(frag=no), packets:19, bytes:11614, used:0.001s, actions:outputcheck_pkt_len(size=200,gt(4),le(5)),3
+in_port(3),eth(),eth_type(0x0800),ipv4(frag=no), packets:19, bytes:11614, used:0.001s, actions:output
+])
+
+AT_CHECK([ovs-appctl dpctl/dump-flows type=offloaded], [0], [])
+
+AT_CHECK([test $(ovs-appctl upcall/show | grep -c "offloaded flows") -eq 0], [0], [ignore])
+
+AT_CHECK([cat p3.pcap | awk '{print $NF}' | uniq -c | awk '{$1=$1;print}'], [0], [dnl
+9 1032
+])
+AT_CHECK([cat p4.pcap | awk '{print $NF}' | uniq -c | awk '{$1=$1;print}'], [0], [dnl
+10 72
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
+
+AT_SETUP([offloads - check_pkt_len action - offloads enabled])
+OVS_TRAFFIC_VSWITCHD_START()
+
+ADD_NAMESPACES(at_ns1, at_ns2, at_ns3, at_ns4)
+
+ADD_VETH(p1, at_ns1, br0, "10.1.1.1/24")
+ADD_VETH(p2, at_ns2, br0, "10.1.1.2/24")
+ADD_VETH(p3, at_ns3, br0, "10.1.1.3/24")
+ADD_VETH(p4, at_ns4, br0, "10.1.1.4/24")
+
+AT_DATA([flows.txt], [dnl
+table=0,in_port=2 actions=output:1
+table=0,in_port=1 actions=load:0x1->NXM_NX_REG1[[]],resubmit(,1),load:0x2->NXM_NX_REG1[[]],resubmit(,1)
+table=1,in_port=1,reg1=0x1 actions=check_pkt_larger(200)->NXM_NX_REG0[[0]],resubmit(,4)
+table=1,in_port=1,reg1=0x2 actions=output:2
+table=4,in_port=1,reg0=0x1 actions=output:3
+table=4,in_port=1,reg0=0x0 actions=output:4
+])
+AT_CHECK([ovs-ofctl --protocols=OpenFlow10 add-flows br0 flows.txt])
+
+NS_CHECK_EXEC([at_ns3], [tcpdump -l -n -U -i p3 dst 10.1.1.2 and icmp > p3.pcap &])
+NS_CHECK_EXEC([at_ns4], [tcpdump -l -n -U -i p4 dst 10.1.1.2 and icmp > p4.pcap &])
+sleep 1
+
+NS_CHECK_EXEC([at_ns1], [ping -q -c 10 -i 0.1 -w 2 -s 64 10.1.1.2 | FORMAT_PING], [0], [dnl
+10 packets transmitted, 10 received, 0% packet loss, time 0ms
+], [], [ovs-appctl dpctl/dump-flows; ovs-ofctl dump-flows br0])
+
+NS_CHECK_EXEC([at_ns1], [ping -q -c 10 -i 0.1 -w 2 -s 1024 10.1.1.2 | FORMAT_PING], [0], [dnl
+10 packets transmitted, 10 received, 0% packet loss, time 0ms
+], [], [ovs-appctl dpctl/dump-flows; ovs-ofctl dump-flows br0])
+
+AT_CHECK([ovs-appctl dpctl/dump-flows | grep "eth_type(0x0800)" | DUMP_CLEAN_SORTED], [0], [dnl
+in_port(2),eth(),eth_type(0x0800),ipv4(frag=no), packets:19, bytes:11614, used:0.001s, actions:outputcheck_pkt_len(size=200,gt(4),le(5)),3
+in_port(3),eth(),eth_type(0x0800),ipv4(frag=no), packets:19, bytes:11614, used:0.001s, actions:output
+])
+
+AT_CHECK([ovs-appctl dpctl/dump-flows type=ovs | grep "eth_type(0x0800)" | DUMP_CLEAN_SORTED], [0], [])
+
+AT_CHECK([ovs-appctl dpctl/dump-flows type=offloaded], [0], [dnl
+in_port(2),eth(),eth_type(0x0800),ipv4(frag=no), packets:19, bytes:11614, used:0.001s, actions:outputcheck_pkt_len(size=200,gt(4),le(5)),3
+in_port(3),eth(),eth_type(0x0800),ipv4(frag=no), packets:19, bytes:11614, used:0.001s, actions:output
+])
+
+AT_CHECK([ovs-appctl upcall/show | grep -E "offloaded flows : [[1-9]]"], [0], [ignore])
+
+AT_CHECK([cat p3.pcap | awk '{print $NF}' | uniq -c | awk '{$1=$1;print}'], [0], [dnl
+9 1032
+])
+AT_CHECK([cat p4.pcap | awk '{print $NF}' | uniq -c | awk '{$1=$1;print}'], [0], [dnl
+10 72
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
