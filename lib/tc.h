@@ -174,6 +174,7 @@ enum tc_action_type {
     TC_ACT_MPLS_SET,
     TC_ACT_GOTO,
     TC_ACT_CT,
+    TC_ACT_POLICE_MTU,
 };
 
 enum nat_type {
@@ -256,9 +257,16 @@ struct tc_action {
             bool force;
             bool commit;
         } ct;
-     };
+        struct {
+            uint32_t result_jump;
+            uint16_t mtu;
+        } police;
+    };
 
-     enum tc_action_type type;
+    enum tc_action_type type;
+    uint32_t jump_action;
+#define JUMP_ACTION_STOP 0xffffffff
+
 };
 
 enum tc_offloaded_state {

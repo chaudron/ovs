@@ -1015,6 +1015,18 @@ nl_parse_tcf(const struct tcf_t *tm, struct tc_flower *flower)
     flower->lastused = time_msec() - (tm->lastuse * 1000 / get_user_hz());
 }
 
+static void
+nl_parse_action_pc(uint32_t action_pc, struct tc_action *action)
+{
+    if (action_pc == TC_ACT_STOLEN) {
+        action->jump_action = JUMP_ACTION_STOP;
+    } else if (action_pc & TC_ACT_JUMP) {
+        action->jump_action = action_pc & TC_ACT_EXT_VAL_MASK;
+    } else {
+        action->jump_action = 0;
+    }
+}
+
 static const struct nl_policy pedit_policy[] = {
     [TCA_PEDIT_TM] = { .type = NL_A_UNSPEC,
                        .min_len = sizeof(struct tcf_t),
@@ -1121,6 +1133,7 @@ nl_parse_act_pedit(struct nlattr *options, struct tc_flower *flower)
     nl_parse_tcf(nl_attr_get_unspec(pe_attrs[TCA_PEDIT_TM],
                                     sizeof(struct tcf_t)),
                  flower);
+    nl_parse_action_pc(pe->action, action);
     return 0;
 }
 
@@ -1298,6 +1311,7 @@ nl_parse_act_tunnel_key(struct nlattr *options, struct tc_flower *flower)
         if (err) {
             return err;
         }
+        nl_parse_action_pc(tun->action, action);
     } else if (tun->t_action == TCA_TUNNEL_KEY_ACT_RELEASE) {
         flower->tunnel = true;
     } else {
@@ -1343,6 +1357,7 @@ nl_parse_act_gact(struct nlattr *options, struct tc_flower *flower)
         action = &flower->actions[flower->action_count++];
         action->chain = p->action & TC_ACT_EXT_VAL_MASK;
         action->type = TC_ACT_GOTO;
+        nl_parse_action_pc(p->action, action);
     } else if (p->action != TC_ACT_SHOT) {
         VLOG_ERR_RL(&error_rl, "unknown gact action: %d", p->action);
         return EINVAL;
@@ -1402,7 +1417,7 @@ nl_parse_act_mirred(struct nlattr *options, struct tc_flower *flower)
     mirred_tm = mirred_attrs[TCA_MIRRED_TM];
     tm = nl_attr_get_unspec(mirred_tm, sizeof *tm);
     nl_parse_tcf(tm, flower);
-
+    nl_parse_action_pc(m->action, action);
     return 0;
 }
 
@@ -1529,6 +1544,7 @@ nl_parse_act_ct(struct nlattr *options, struct tc_flower *flower)
     nl_parse_tcf(nl_attr_get_unspec(ct_attrs[TCA_CT_TM],
                                     sizeof(struct tcf_t)),
                  flower);
+    nl_parse_action_pc(ct->action, action);
     return 0;
 }
 
@@ -1581,6 +1597,7 @@ nl_parse_act_vlan(struct nlattr *options, struct tc_flower *flower)
     nl_parse_tcf(nl_attr_get_unspec(vlan_attrs[TCA_VLAN_TM],
                                     sizeof(struct tcf_t)),
                  flower);
+    nl_parse_action_pc(v->action, action);
     return 0;
 }
 
@@ -1680,6 +1697,7 @@ nl_parse_act_mpls(struct nlattr *options, struct tc_flower *flower)
     nl_parse_tcf(nl_attr_get_unspec(mpls_attrs[TCA_MPLS_TM],
                                     sizeof(struct tcf_t)),
                  flower);
+    nl_parse_action_pc(m->action, action);
     return 0;
 }
 
@@ -1726,8 +1744,48 @@ nl_parse_act_csum(struct nlattr *options, struct tc_flower *flower)
     nl_parse_tcf(nl_attr_get_unspec(csum_attrs[TCA_CSUM_TM],
                                     sizeof(struct tcf_t)),
                  flower);
+    /* The action_pc should be set on the previous action. */
+    if (flower->action_count < TCA_ACT_MAX_NUM) {
+        struct tc_action *action = &flower->actions[flower->action_count];
+
+        nl_parse_action_pc(c->action, action);
+    }
     return 0;
 }
+
+static const struct nl_policy police_policy[] = {
+    [TCA_POLICE_TBF] = { .type = NL_A_UNSPEC,
+                         .min_len = sizeof(struct tc_police),
+                         .optional = false, },
+    [TCA_POLICE_RESULT] = { .type = NL_A_U32, .optional = false, },
+};
+
+static int
+nl_parse_act_police_mtu(struct nlattr *options, struct tc_flower *flower)
+{
+    struct nlattr *police_attrs[ARRAY_SIZE(police_policy)];
+    const struct tc_police *police;
+    struct nlattr *police_result;
+    struct tc_action *action;
+
+    if (!nl_parse_nested(options, police_policy, police_attrs,
+                         ARRAY_SIZE(police_policy))) {
+        VLOG_ERR_RL(&error_rl, "Failed to parse police action options.");
+        return EPROTO;
+    }
+    police = nl_attr_get_unspec(police_attrs[TCA_CSUM_PARMS], sizeof *police);
+    police_result = police_attrs[TCA_POLICE_RESULT];
+
+    action = &flower->actions[flower->action_count++];
+    action->type = TC_ACT_POLICE_MTU;
+    action->police.result_jump = nl_attr_get_u32(police_result) &
+        TC_ACT_EXT_VAL_MASK;
+    action->police.mtu = police->mtu;
+
+    nl_parse_action_pc(police->action, action);
+    return 0;
+}
+
 
 static const struct nl_policy act_policy[] = {
     [TCA_ACT_KIND] = { .type = NL_A_STRING, .optional = false, },
@@ -1787,6 +1845,8 @@ nl_parse_single_action(struct nlattr *action, struct tc_flower *flower,
         /* Added for TC rule only (not in OvS rule) so ignore. */
     } else if (!strcmp(act_kind, "ct")) {
         nl_parse_act_ct(act_options, flower);
+    } else if (!strcmp(act_kind, "police")) {
+        nl_parse_act_police_mtu(act_options, flower);
     } else {
         VLOG_ERR_RL(&error_rl, "unknown tc action kind: %s", act_kind);
         err = EINVAL;
@@ -2056,14 +2116,14 @@ tc_get_tc_cls_policy(enum tc_offload_policy policy)
 }
 
 static void
-nl_msg_put_act_csum(struct ofpbuf *request, uint32_t flags)
+nl_msg_put_act_csum(struct ofpbuf *request, uint32_t flags, uint32_t action_pc)
 {
     size_t offset;
 
     nl_msg_put_string(request, TCA_ACT_KIND, "csum");
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS);
     {
-        struct tc_csum parm = { .action = TC_ACT_PIPE,
+        struct tc_csum parm = { .action = action_pc,
                                 .update_flags = flags };
 
         nl_msg_put_unspec(request, TCA_CSUM_PARMS, &parm, sizeof parm);
@@ -2073,7 +2133,7 @@ nl_msg_put_act_csum(struct ofpbuf *request, uint32_t flags)
 
 static void
 nl_msg_put_act_pedit(struct ofpbuf *request, struct tc_pedit *parm,
-                     struct tc_pedit_key_ex *ex)
+                     struct tc_pedit_key_ex *ex, uint32_t action_pc)
 {
     size_t ksize = sizeof *parm + parm->nkeys * sizeof(struct tc_pedit_key);
     size_t offset, offset_keys_ex, offset_key;
@@ -2082,7 +2142,7 @@ nl_msg_put_act_pedit(struct ofpbuf *request, struct tc_pedit *parm,
     nl_msg_put_string(request, TCA_ACT_KIND, "pedit");
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS);
     {
-        parm->action = TC_ACT_PIPE;
+        parm->action = action_pc;
 
         nl_msg_put_unspec(request, TCA_PEDIT_PARMS_EX, parm, ksize);
         offset_keys_ex = nl_msg_start_nested(request, TCA_PEDIT_KEYS_EX);
@@ -2099,14 +2159,14 @@ nl_msg_put_act_pedit(struct ofpbuf *request, struct tc_pedit *parm,
 
 static void
 nl_msg_put_act_push_vlan(struct ofpbuf *request, ovs_be16 tpid,
-                         uint16_t vid, uint8_t prio)
+                         uint16_t vid, uint8_t prio, uint32_t action_pc)
 {
     size_t offset;
 
     nl_msg_put_string(request, TCA_ACT_KIND, "vlan");
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS);
     {
-        struct tc_vlan parm = { .action = TC_ACT_PIPE,
+        struct tc_vlan parm = { .action = action_pc,
                                 .v_action = TCA_VLAN_ACT_PUSH };
 
         nl_msg_put_unspec(request, TCA_VLAN_PARMS, &parm, sizeof parm);
@@ -2118,14 +2178,14 @@ nl_msg_put_act_push_vlan(struct ofpbuf *request, ovs_be16 tpid,
 }
 
 static void
-nl_msg_put_act_pop_vlan(struct ofpbuf *request)
+nl_msg_put_act_pop_vlan(struct ofpbuf *request, uint32_t action_pc)
 {
     size_t offset;
 
     nl_msg_put_string(request, TCA_ACT_KIND, "vlan");
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS);
     {
-        struct tc_vlan parm = { .action = TC_ACT_PIPE,
+        struct tc_vlan parm = { .action = action_pc,
                                 .v_action = TCA_VLAN_ACT_POP };
 
         nl_msg_put_unspec(request, TCA_VLAN_PARMS, &parm, sizeof parm);
@@ -2134,14 +2194,15 @@ nl_msg_put_act_pop_vlan(struct ofpbuf *request)
 }
 
 static void
-nl_msg_put_act_pop_mpls(struct ofpbuf *request, ovs_be16 proto)
+nl_msg_put_act_pop_mpls(struct ofpbuf *request, ovs_be16 proto,
+                        uint32_t action_pc)
 {
     size_t offset;
 
     nl_msg_put_string(request, TCA_ACT_KIND, "mpls");
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS | NLA_F_NESTED);
     {
-        struct tc_mpls parm = { .action = TC_ACT_PIPE,
+        struct tc_mpls parm = { .action = action_pc,
                                 .m_action = TCA_MPLS_ACT_POP };
 
         nl_msg_put_unspec(request, TCA_MPLS_PARMS, &parm, sizeof parm);
@@ -2152,14 +2213,15 @@ nl_msg_put_act_pop_mpls(struct ofpbuf *request, ovs_be16 proto)
 
 static void
 nl_msg_put_act_push_mpls(struct ofpbuf *request, ovs_be16 proto,
-                         uint32_t label, uint8_t tc, uint8_t ttl, uint8_t bos)
+                         uint32_t label, uint8_t tc, uint8_t ttl, uint8_t bos,
+                         uint32_t action_pc)
 {
     size_t offset;
 
     nl_msg_put_string(request, TCA_ACT_KIND, "mpls");
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS | NLA_F_NESTED);
     {
-        struct tc_mpls parm = { .action = TC_ACT_PIPE,
+        struct tc_mpls parm = { .action = action_pc,
                                 .m_action = TCA_MPLS_ACT_PUSH };
 
         nl_msg_put_unspec(request, TCA_MPLS_PARMS, &parm, sizeof parm);
@@ -2174,14 +2236,14 @@ nl_msg_put_act_push_mpls(struct ofpbuf *request, ovs_be16 proto,
 
 static void
 nl_msg_put_act_set_mpls(struct ofpbuf *request, uint32_t label, uint8_t tc,
-                        uint8_t ttl, uint8_t bos)
+                        uint8_t ttl, uint8_t bos, uint32_t action_pc)
 {
     size_t offset;
 
     nl_msg_put_string(request, TCA_ACT_KIND, "mpls");
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS | NLA_F_NESTED);
     {
-        struct tc_mpls parm = { .action = TC_ACT_PIPE,
+        struct tc_mpls parm = { .action = action_pc,
                                 .m_action = TCA_MPLS_ACT_MODIFY };
 
         nl_msg_put_unspec(request, TCA_MPLS_PARMS, &parm, sizeof parm);
@@ -2250,14 +2312,14 @@ nl_msg_put_act_tunnel_key_set(struct ofpbuf *request, bool id_present,
                               struct in6_addr *ipv6_dst,
                               ovs_be16 tp_dst, uint8_t tos, uint8_t ttl,
                               struct tun_metadata tun_metadata,
-                              uint8_t no_csum)
+                              uint8_t no_csum, uint32_t action_pc)
 {
     size_t offset;
 
     nl_msg_put_string(request, TCA_ACT_KIND, "tunnel_key");
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS);
     {
-        struct tc_tunnel_key tun = { .action = TC_ACT_PIPE,
+        struct tc_tunnel_key tun = { .action = action_pc,
                                      .t_action = TCA_TUNNEL_KEY_ACT_SET };
 
         nl_msg_put_unspec(request, TCA_TUNNEL_KEY_PARMS, &tun, sizeof tun);
@@ -2310,7 +2372,8 @@ nl_msg_put_act_gact(struct ofpbuf *request, uint32_t chain)
 }
 
 static void
-nl_msg_put_act_ct(struct ofpbuf *request, struct tc_action *action)
+nl_msg_put_act_ct(struct ofpbuf *request, struct tc_action *action,
+                  uint32_t action_pc)
 {
     uint16_t ct_action = 0;
     size_t offset;
@@ -2319,7 +2382,7 @@ nl_msg_put_act_ct(struct ofpbuf *request, struct tc_action *action)
     offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS | NLA_F_NESTED);
     {
         struct tc_ct ct = {
-                .action = TC_ACT_PIPE,
+            .action = action_pc,
         };
 
         if (!action->ct.clear) {
@@ -2526,7 +2589,8 @@ csum_update_flag(struct tc_flower *flower,
 
 static int
 nl_msg_put_flower_rewrite_pedits(struct ofpbuf *request,
-                                 struct tc_flower *flower)
+                                 struct tc_flower *flower,
+                                 uint32_t action_pc)
 {
     struct {
         struct tc_pedit sel;
@@ -2593,9 +2657,31 @@ nl_msg_put_flower_rewrite_pedits(struct ofpbuf *request,
             }
         }
     }
-    nl_msg_put_act_pedit(request, &sel.sel, sel.keys_ex);
+    nl_msg_put_act_pedit(request, &sel.sel, sel.keys_ex,
+                         flower->csum_update_flags ? TC_ACT_PIPE : action_pc);
 
     return 0;
+}
+
+static void
+nl_msg_put_act_police_mtu(struct ofpbuf *request, struct tc_action *action,
+                          uint32_t action_pc)
+{
+    size_t offset;
+
+    nl_msg_put_string(request, TCA_ACT_KIND, "police");
+    offset = nl_msg_start_nested(request, TCA_ACT_OPTIONS);
+    {
+        struct tc_police p = { .action = action_pc,
+            .mtu = action->police.mtu };
+
+        nl_msg_put_unspec(request, TCA_POLICE_TBF, &p, sizeof p);
+        nl_msg_put_u32(request, TCA_POLICE_RESULT,
+                       TC_ACT_JUMP
+                       | (action->police.result_jump & TC_ACT_EXT_VAL_MASK));
+
+    }
+    nl_msg_end_nested(request, offset);
 }
 
 static int
@@ -2614,10 +2700,22 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
 
         action = flower->actions;
         for (i = 0; i < flower->action_count; i++, action++) {
+            uint32_t action_pc; /* Programmatic Control */
+
+            if (!action->jump_action) {
+                action_pc = TC_ACT_PIPE;
+            } else if (action->jump_action == JUMP_ACTION_STOP) {
+                action_pc = TC_ACT_STOLEN;
+            } else {
+                action_pc = TC_ACT_JUMP | (action->jump_action &
+                                           TC_ACT_EXT_VAL_MASK);
+            }
+
             switch (action->type) {
             case TC_ACT_PEDIT: {
                 act_offset = nl_msg_start_nested(request, act_index++);
-                error = nl_msg_put_flower_rewrite_pedits(request, flower);
+                error = nl_msg_put_flower_rewrite_pedits(request, flower,
+                                                         action_pc);
                 if (error) {
                     return error;
                 }
@@ -2625,7 +2723,8 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
 
                 if (flower->csum_update_flags) {
                     act_offset = nl_msg_start_nested(request, act_index++);
-                    nl_msg_put_act_csum(request, flower->csum_update_flags);
+                    nl_msg_put_act_csum(request, flower->csum_update_flags,
+                                        action_pc);
                     nl_msg_put_act_flags(request);
                     nl_msg_end_nested(request, act_offset);
                 }
@@ -2643,14 +2742,15 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
                                               action->encap.tos,
                                               action->encap.ttl,
                                               action->encap.data,
-                                              action->encap.no_csum);
+                                              action->encap.no_csum,
+                                              action_pc);
                 nl_msg_put_act_flags(request);
                 nl_msg_end_nested(request, act_offset);
             }
             break;
             case TC_ACT_VLAN_POP: {
                 act_offset = nl_msg_start_nested(request, act_index++);
-                nl_msg_put_act_pop_vlan(request);
+                nl_msg_put_act_pop_vlan(request, action_pc);
                 nl_msg_put_act_flags(request);
                 nl_msg_end_nested(request, act_offset);
             }
@@ -2660,14 +2760,16 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
                 nl_msg_put_act_push_vlan(request,
                                          action->vlan.vlan_push_tpid,
                                          action->vlan.vlan_push_id,
-                                         action->vlan.vlan_push_prio);
+                                         action->vlan.vlan_push_prio,
+                                         action_pc);
                 nl_msg_put_act_flags(request);
                 nl_msg_end_nested(request, act_offset);
             }
             break;
             case TC_ACT_MPLS_POP: {
                 act_offset = nl_msg_start_nested(request, act_index++);
-                nl_msg_put_act_pop_mpls(request, action->mpls.proto);
+                nl_msg_put_act_pop_mpls(request, action->mpls.proto,
+                                        action_pc);
                 nl_msg_end_nested(request, act_offset);
             }
             break;
@@ -2675,7 +2777,8 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
                 act_offset = nl_msg_start_nested(request, act_index++);
                 nl_msg_put_act_push_mpls(request, action->mpls.proto,
                                          action->mpls.label, action->mpls.tc,
-                                         action->mpls.ttl, action->mpls.bos);
+                                         action->mpls.ttl, action->mpls.bos,
+                                         action_pc);
                 nl_msg_end_nested(request, act_offset);
             }
             break;
@@ -2683,7 +2786,7 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
                 act_offset = nl_msg_start_nested(request, act_index++);
                 nl_msg_put_act_set_mpls(request, action->mpls.label,
                                         action->mpls.tc, action->mpls.ttl,
-                                        action->mpls.bos);
+                                        action->mpls.bos, action_pc);
                 nl_msg_end_nested(request, act_offset);
             }
             break;
@@ -2721,12 +2824,13 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
                         nl_msg_put_act_mirred(request, ifindex, TC_ACT_STOLEN,
                                               TCA_EGRESS_REDIR);
                     }
+                    action->jump_action = JUMP_ACTION_STOP;
                 } else {
                     if (ingress) {
-                        nl_msg_put_act_mirred(request, ifindex, TC_ACT_PIPE,
+                        nl_msg_put_act_mirred(request, ifindex, action_pc,
                                               TCA_INGRESS_MIRROR);
                     } else {
-                        nl_msg_put_act_mirred(request, ifindex, TC_ACT_PIPE,
+                        nl_msg_put_act_mirred(request, ifindex, action_pc,
                                               TCA_EGRESS_MIRROR);
                     }
                 }
@@ -2754,8 +2858,16 @@ nl_msg_put_flower_acts(struct ofpbuf *request, struct tc_flower *flower)
             break;
             case TC_ACT_CT: {
                 act_offset = nl_msg_start_nested(request, act_index++);
-                nl_msg_put_act_ct(request, action);
+                nl_msg_put_act_ct(request, action, action_pc);
                 nl_msg_put_act_cookie(request, &flower->act_cookie);
+                nl_msg_end_nested(request, act_offset);
+            }
+            break;
+            case TC_ACT_POLICE_MTU: {
+                act_offset = nl_msg_start_nested(request, act_index++);
+                nl_msg_put_act_police_mtu(request, action, action_pc);
+                nl_msg_put_act_cookie(request, &flower->act_cookie);
+                nl_msg_put_act_flags(request);
                 nl_msg_end_nested(request, act_offset);
             }
             break;
