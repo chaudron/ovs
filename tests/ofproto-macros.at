@@ -138,7 +138,7 @@ m4_divert_pop([PREPARE_TESTS])
 
 m4_define([TESTABLE_LOG], [-vPATTERN:ANY:'%c|%p|%m'])
 
-# _OVS_VSWITCHD_START([vswitchd-aux-args])
+# _OVS_VSWITCHD_START([vswitchd-aux-args] [dbinit-aux-args] [pre-vswitchd-commands])
 #
 # Creates an empty database and starts ovsdb-server.
 # Starts ovs-vswitchd, with additional arguments 'vswitchd-aux-args'.
@@ -159,6 +159,9 @@ m4_define([_OVS_VSWITCHD_START],
    dnl Initialize database.
    AT_CHECK([ovs-vsctl --no-wait init $2])
 
+   dnl Run extra commands before ovs-vswitchd starts.
+   AT_CHECK([:; $3])
+
    dnl Start ovs-vswitchd.
    AT_CHECK([ovs-vswitchd $1 --detach --no-chdir --pidfile --log-file -vvconn -vofproto_dpif -vunixctl], [0], [], [stderr])
    AT_CAPTURE_FILE([ovs-vswitchd.log])
@@ -174,6 +177,7 @@ m4_define([_OVS_VSWITCHD_START],
 /ofproto|INFO|datapath ID changed to fedcba9876543210/d
 /dpdk|INFO|DPDK Disabled - Use other_config:dpdk-init to enable/d
 /netlink_socket|INFO|netlink: could not enable listening to all nsid/d
+/netdev_offload|INFO|netdev: Flow API Enabled/d
 /probe tc:/d
 /setting extended ack support failed/d
 /tc: Using policy/d']])
