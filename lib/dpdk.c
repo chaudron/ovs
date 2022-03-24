@@ -491,7 +491,7 @@ dpdk_available(void)
 }
 
 bool
-dpdk_attach_thread(unsigned cpu)
+dpdk_attach_thread(unsigned cpu, bool assist_thread)
 {
     /* NON_PMD_CORE_ID is reserved for use by non pmd threads. */
     ovs_assert(cpu != NON_PMD_CORE_ID);
@@ -506,18 +506,22 @@ dpdk_attach_thread(unsigned cpu)
         return false;
     }
 
-    VLOG_INFO("PMD thread uses DPDK lcore %u.", rte_lcore_id());
+    VLOG_INFO("PMD %sthread uses DPDK lcore %u.",
+              assist_thread ? "assist " : "",
+              rte_lcore_id());
     return true;
 }
 
 void
-dpdk_detach_thread(void)
+dpdk_detach_thread(bool assist_thread)
 {
     unsigned int lcore_id;
 
     lcore_id = rte_lcore_id();
     rte_thread_unregister();
-    VLOG_INFO("PMD thread released DPDK lcore %u.", lcore_id);
+    VLOG_INFO("PMD %sthread released DPDK lcore %u.",
+              assist_thread ? "assist " : "",
+              lcore_id);
 }
 
 void

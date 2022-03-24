@@ -59,7 +59,13 @@ int ovs_numa_get_n_cores_on_numa(int numa_id);
 unsigned ovs_numa_get_largest_core_id(void);
 struct ovs_numa_dump *ovs_numa_dump_cores_on_numa(int numa_id);
 struct ovs_numa_dump *ovs_numa_dump_cores_with_cmask(const char *cmask);
+struct ovs_numa_dump *ovs_numa_dump_n_cores_per_numa_with_cmask(
+    const char *cmask, int cores_per_numa);
 struct ovs_numa_dump *ovs_numa_dump_n_cores_per_numa(int n);
+void ovs_numa_dump_add_core(struct ovs_numa_dump *dump, int numa_id,
+                            int core_id);
+void ovs_numa_dump_del_core(struct ovs_numa_dump *dump, int numa_id,
+                            int core_id);
 bool ovs_numa_dump_contains_core(const struct ovs_numa_dump *,
                                  int numa_id, unsigned core_id);
 size_t ovs_numa_dump_count(const struct ovs_numa_dump *);
@@ -70,6 +76,9 @@ int ovs_numa_thread_setaffinity_core(unsigned core_id);
 
 #define FOR_EACH_CORE_ON_DUMP(ITER, DUMP)                    \
     HMAP_FOR_EACH (ITER, hmap_node, &(DUMP)->cores)
+
+#define FOR_EACH_CORE_ON_DUMP_SAFE(ITER, DUMP)               \
+    HMAP_FOR_EACH_SAFE (ITER, hmap_node, &(DUMP)->cores)
 
 #define FOR_EACH_NUMA_ON_DUMP(ITER, DUMP)                    \
     HMAP_FOR_EACH (ITER, hmap_node, &(DUMP)->numas)

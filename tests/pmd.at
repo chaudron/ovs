@@ -1300,3 +1300,65 @@ OVS_WAIT_UNTIL([tail -n +$LINENUM ovs-vswitchd.log | grep "PMD load based sleeps
 
 OVS_VSWITCHD_STOP
 AT_CLEANUP
+
+
+AT_SETUP([PMD - basic assist thread configuration])
+AT_SKIP_IF([! ovs-vswitchd --version | grep -q DPDK])
+OVS_VSWITCHD_START([add-port br0 p0 -- set Interface p0 type=dummy-pmd -- set Open_vSwitch . other_config:pmd-cpu-mask=1 -- set Open_vSwitch . other_config:pmd-assist-mask=2],
+                   [], [], [--dummy-numa 0,0,1,1])
+
+CHECK_CPU_DISCOVERED(4)
+CHECK_PMD_THREADS_CREATED()
+OVS_WAIT_UNTIL([grep "PMD assist thread on numa_id: 0, core id:  1 created" ovs-vswitchd.log])
+
+TMP=$(($(cat ovs-vswitchd.log | wc -l | tr -d [[:blank:]])+1))
+AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:pmd-assist-mask=0x4])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 1, core id:  2 created"])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 0, core id:  1 destroyed"])
+
+TMP=$(($(cat ovs-vswitchd.log | wc -l | tr -d [[:blank:]])+1))
+AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:pmd-assist-mask=0x1])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "Invalid pmd-assist-mask configuration, core 0 overlaps with the pmd-cpu-mask configuration"])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 1, core id:  2 destroyed"])
+
+TMP=$(($(cat ovs-vswitchd.log | wc -l | tr -d [[:blank:]])+1))
+AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:pmd-cpu-mask=0x5] -- set Open_vSwitch . other_config:pmd-assist-mask=0xa)
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "There are 1 pmd threads on numa node 0"])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "There are 1 pmd threads on numa node 1"])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 0, core id:  1 created"])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 1, core id:  3 created"])
+
+TMP=$(($(cat ovs-vswitchd.log | wc -l | tr -d [[:blank:]])+1))
+AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:pmd-cpu-mask=0x1 -- set Open_vSwitch . other_config:pmd-assist-mask=0x0])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 0, core id:  1 destroyed"])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 1, core id:  3 destroyed"])
+
+OVS_VSWITCHD_STOP(["/Invalid pmd-assist-mask configuration/d"])
+AT_CLEANUP
+
+
+AT_SETUP([PMD - multi-numa assist thread configuration])
+AT_SKIP_IF([! ovs-vswitchd --version | grep -q DPDK])
+OVS_VSWITCHD_START([add-port br0 p0 -- set Interface p0 type=dummy-pmd -- set Open_vSwitch . other_config:pmd-cpu-mask=1],
+                   [], [], [--dummy-numa 0,0,1,2])
+
+CHECK_CPU_DISCOVERED(4)
+CHECK_PMD_THREADS_CREATED()
+
+TMP=$(($(cat ovs-vswitchd.log | wc -l | tr -d [[:blank:]])+1))
+AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:pmd-assist-mask=0x2])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 0, core id:  1 created"])
+
+TMP=$(($(cat ovs-vswitchd.log | wc -l | tr -d [[:blank:]])+1))
+AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:pmd-assist-mask=0xc])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 0, core id:  1 destroyed"])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 1, core id:  2 created"])
+AT_CHECK([grep -q "PMD assist thread on numa_id: 2, core id:  3 created" ovs-vswitchd.log], [1])
+
+TMP=$(($(cat ovs-vswitchd.log | wc -l | tr -d [[:blank:]])+1))
+AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:pmd-assist-mask=0x8])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 1, core id:  2 destroyed"])
+OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 2, core id:  3 created"])
+
+OVS_VSWITCHD_STOP(["/Invalid pmd-assist-mask configuration/d"])
+AT_CLEANUP

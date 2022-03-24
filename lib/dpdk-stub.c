@@ -39,13 +39,13 @@ dpdk_init(const struct smap *ovs_other_config)
 }
 
 bool
-dpdk_attach_thread(unsigned cpu OVS_UNUSED)
+dpdk_attach_thread(unsigned cpu OVS_UNUSED, bool assist_thread OVS_UNUSED)
 {
     return false;
 }
 
 void
-dpdk_detach_thread(void)
+dpdk_detach_thread(bool assist_thread OVS_UNUSED)
 {
 }
 

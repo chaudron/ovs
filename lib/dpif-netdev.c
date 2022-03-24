@@ -305,6 +305,8 @@ struct dp_netdev {
 
     /* Stores all 'struct dp_netdev_pmd_thread's. */
     struct cmap poll_threads;
+    /* Stores all 'struct dp_netdev_assist_thread's. */
+    struct cmap assist_threads;
     /* id pool for per thread static_tx_qid. */
     struct id_pool *tx_qid_pool;
     struct ovs_mutex tx_qid_pool_mutex;
@@ -325,6 +327,9 @@ struct dp_netdev {
 
     /* Cpu mask for pin of pmd threads. */
     char *pmd_cmask;
+
+    /* CPU mask for assisted PMD threads. */
+    char *pmd_amask;
 
     uint64_t last_tnl_conf_seq;
 
@@ -572,6 +577,8 @@ static void dp_netdev_set_nonpmd(struct dp_netdev *dp)
     OVS_REQ_WRLOCK(dp->port_rwlock);
 
 static void *pmd_thread_main(void *);
+static void *assist_thread_main(void *);
+
 static struct dp_netdev_pmd_thread *dp_netdev_get_pmd(struct dp_netdev *dp,
                                                       unsigned core_id);
 static struct dp_netdev_pmd_thread *
@@ -615,6 +622,23 @@ static void pmd_load_cached_ports(struct dp_netdev_pmd_thread *pmd)
 static inline void
 dp_netdev_pmd_try_optimize(struct dp_netdev_pmd_thread *pmd,
                            struct polled_queue *poll_list, int poll_cnt);
+static void
+dp_netdev_configure_assist_thread(struct dp_netdev_assist_thread *assist,
+                                  struct dp_netdev *dp,
+                                  unsigned core_id, int numa_id);
+static void
+dp_netdev_destroy_assist_thread(struct dp_netdev_assist_thread *assist);
+static void
+dp_netdev_del_assist_thread(struct dp_netdev_assist_thread *assist);
+static struct dp_netdev_assist_thread *
+dp_netdev_get_assist_thread(struct dp_netdev *dp, unsigned core_id);
+static struct dp_netdev_assist_thread *
+dp_netdev_get_assist_thread_for_pmd(struct dp_netdev_pmd_thread *pmd);
+static void dp_netdev_destroy_all_assist_threads(struct dp_netdev *dp);
+static bool
+dp_netdev_assist_thread_try_ref(struct dp_netdev_assist_thread *assist);
+static void
+dp_netdev_assist_thread_unref(struct dp_netdev_assist_thread *assist);
 static void
 dp_netdev_rxq_set_cycles(struct dp_netdev_rxq *rx,
                          enum rxq_cycles_counter_type type,
@@ -1868,6 +1892,7 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
     atomic_init(&dp->tx_flush_interval, DEFAULT_TX_FLUSH_INTERVAL);
 
     cmap_init(&dp->poll_threads);
+    cmap_init(&dp->assist_threads);
     dp->pmd_rxq_assign_type = SCHED_CYCLES;
 
     ovs_mutex_init(&dp->tx_qid_pool_mutex);
@@ -1977,6 +2002,9 @@ dp_netdev_free(struct dp_netdev *dp)
     dp_netdev_destroy_all_pmds(dp, true);
     cmap_destroy(&dp->poll_threads);
 
+    dp_netdev_destroy_all_assist_threads(dp);
+    cmap_destroy(&dp->assist_threads);
+
     ovs_mutex_destroy(&dp->tx_qid_pool_mutex);
     id_pool_destroy(dp->tx_qid_pool);
 
@@ -2001,6 +2029,7 @@ dp_netdev_free(struct dp_netdev *dp)
     dp_netdev_meter_destroy(dp);
 
     free(dp->pmd_cmask);
+    free(dp->pmd_amask);
     free(CONST_CAST(char *, dp->name));
     free(dp);
 }
@@ -2098,6 +2127,12 @@ dp_netdev_reload_pmd__(struct dp_netdev_pmd_thread *pmd)
 
     seq_change(pmd->reload_seq);
     atomic_store_explicit(&pmd->reload, true, memory_order_release);
+}
+
+static void
+dp_netdev_reload_assist_thread__(struct dp_netdev_assist_thread *assist)
+{
+    atomic_store_explicit(&assist->reload, true, memory_order_release);
 }
 
 static uint32_t
@@ -4821,6 +4856,7 @@ dpif_netdev_set_config(struct dpif *dpif, const struct smap *other_config)
 {
     struct dp_netdev *dp = get_dp_netdev(dpif);
     const char *cmask = smap_get(other_config, "pmd-cpu-mask");
+    const char *amask = smap_get(other_config, "pmd-assist-mask");
     const char *pmd_rxq_assign = smap_get_def(other_config, "pmd-rxq-assign",
                                              "cycles");
     unsigned long long insert_prob =
@@ -4848,6 +4884,12 @@ dpif_netdev_set_config(struct dpif *dpif, const struct smap *other_config)
     if (!nullable_string_is_equal(dp->pmd_cmask, cmask)) {
         free(dp->pmd_cmask);
         dp->pmd_cmask = nullable_xstrdup(cmask);
+        dp_netdev_request_reconfigure(dp);
+    }
+
+    if (!nullable_string_is_equal(dp->pmd_amask, amask)) {
+        free(dp->pmd_amask);
+        dp->pmd_amask = nullable_xstrdup(amask);
         dp_netdev_request_reconfigure(dp);
     }
 
@@ -6311,7 +6353,15 @@ pmd_rebalance_dry_run(struct dp_netdev *dp)
 static void
 reload_affected_pmds(struct dp_netdev *dp)
 {
+    struct dp_netdev_assist_thread *assist;
     struct dp_netdev_pmd_thread *pmd;
+    bool reload;
+
+    CMAP_FOR_EACH (assist, node, &dp->assist_threads) {
+        if (assist->need_reload) {
+            dp_netdev_reload_assist_thread__(assist);
+        }
+    }
 
     CMAP_FOR_EACH (pmd, node, &dp->poll_threads) {
         if (pmd->need_reload) {
@@ -6319,11 +6369,20 @@ reload_affected_pmds(struct dp_netdev *dp)
         }
     }
 
+    CMAP_FOR_EACH (assist, node, &dp->assist_threads) {
+        if (assist->need_reload) {
+            do {
+                atomic_read_explicit(&assist->reload, &reload,
+                                     memory_order_acquire);
+            } while (reload);
+
+            assist->need_reload = false;
+        }
+    }
+
     CMAP_FOR_EACH (pmd, node, &dp->poll_threads) {
         if (pmd->need_reload) {
             if (pmd->core_id != NON_PMD_CORE_ID) {
-                bool reload;
-
                 do {
                     atomic_read_explicit(&pmd->reload, &reload,
                                          memory_order_acquire);
@@ -6338,8 +6397,10 @@ static void
 reconfigure_pmd_threads(struct dp_netdev *dp)
     OVS_REQ_RDLOCK(dp->port_rwlock)
 {
+    struct dp_netdev_assist_thread *assist;
     struct dp_netdev_pmd_thread *pmd;
     struct ovs_numa_dump *pmd_cores;
+    struct ovs_numa_dump *assist_cores;
     struct ovs_numa_info_core *core;
     struct hmapx to_delete = HMAPX_INITIALIZER(&to_delete);
     struct hmapx_node *node;
@@ -6355,6 +6416,31 @@ reconfigure_pmd_threads(struct dp_netdev *dp)
         pmd_cores = ovs_numa_dump_cores_with_cmask(dp->pmd_cmask);
     } else {
         pmd_cores = ovs_numa_dump_n_cores_per_numa(NR_PMD_THREADS);
+    }
+
+    /* The pmd assist threads should be started if there's a pmd port in the
+     * datapath and when it's explicitly configured. */
+    if (!has_pmd_port(dp) || !dp->pmd_amask || !dp->pmd_amask[0]) {
+        assist_cores = ovs_numa_dump_n_cores_per_numa(0);
+    } else {
+        assist_cores = ovs_numa_dump_n_cores_per_numa_with_cmask(dp->pmd_amask,
+                                                                 1);
+    }
+
+    /* Check for overlap of the to be started assist threads. If they exist,
+     * ignore the assist_cores configuration and log an error. */
+    FOR_EACH_CORE_ON_DUMP (core, assist_cores) {
+        if (ovs_numa_dump_contains_core(pmd_cores, core->numa_id,
+                                        core->core_id)) {
+            VLOG_ERR("Invalid pmd-assist-mask configuration, core %d "
+                     "overlaps with the pmd-cpu-mask configuration. "
+                     "The pmd-assist-mask configuration is ignored.",
+                     core->core_id);
+
+            ovs_numa_dump_destroy(assist_cores);
+            assist_cores = ovs_numa_dump_n_cores_per_numa(0);
+            break;
+        }
     }
 
     /* We need to adjust 'static_tx_qid's only if we're reducing number of
@@ -6427,6 +6513,97 @@ reconfigure_pmd_threads(struct dp_netdev *dp)
         }
     }
 
+    /* Now that we know which PMDs will be running check if we need all the
+     * configured ones based on the NUMAs. */
+    if (ovs_numa_dump_count(assist_cores) > 1) {
+        unsigned low_core_id = UINT_MAX;
+        int low_numa_id = INT_MAX;
+
+
+        FOR_EACH_CORE_ON_DUMP_SAFE (core, assist_cores) {
+            struct ovs_numa_info_numa *numa;
+            bool found_numa = false;
+
+            if (core->core_id < low_core_id) {
+                low_core_id = core->core_id;
+                low_numa_id = core->numa_id;
+            }
+
+            FOR_EACH_NUMA_ON_DUMP (numa, pmd_cores) {
+                if (numa->numa_id == core->numa_id &&
+                    numa->n_cores > 0) {
+                    found_numa = true;
+                    break;
+                }
+            }
+
+            if (!found_numa) {
+                ovs_numa_dump_del_core(assist_cores, core->numa_id,
+                                       core->core_id);
+            }
+        }
+
+        if (ovs_numa_dump_count(assist_cores) <= 0
+            && low_core_id != UINT_MAX && low_numa_id != INT_MAX) {
+            ovs_numa_dump_add_core(assist_cores, low_numa_id, low_core_id);
+        }
+    }
+
+    /* Are there any unwanted assist threads running? If so, collect them for
+     * later deletion. */
+    hmapx_init(&to_delete);
+    CMAP_FOR_EACH (assist, node, &dp->assist_threads) {
+        if (!ovs_numa_dump_contains_core(assist_cores, assist->numa_id,
+                                         assist->core_id)) {
+            hmapx_add(&to_delete, assist);
+        }
+    }
+
+    HMAPX_FOR_EACH (node, &to_delete) {
+        assist = (struct dp_netdev_assist_thread *) node->data;
+        VLOG_INFO("PMD assist thread on numa_id: %d, core id: %2d destroyed",
+                  assist->numa_id, assist->core_id);
+        dp_netdev_del_assist_thread(assist);
+    }
+
+    changed = !hmapx_is_empty(&to_delete);
+    hmapx_destroy(&to_delete);
+
+    /* Check for required new pmd assist threads. */
+    FOR_EACH_CORE_ON_DUMP (core, assist_cores) {
+        assist = dp_netdev_get_assist_thread(dp, core->core_id);
+        if (!assist) {
+            struct ds name = DS_EMPTY_INITIALIZER;
+
+            assist = xzalloc(sizeof *assist);
+            dp_netdev_configure_assist_thread(assist, dp, core->core_id,
+                                              core->numa_id);
+
+            ds_put_format(&name, "ast-c%02d/id:", core->core_id);
+            assist->thread = ovs_thread_create(ds_cstr(&name),
+                                               assist_thread_main, assist);
+            ds_destroy(&name);
+
+            VLOG_INFO(
+                "PMD assist thread on numa_id: %d, core id: %2d created",
+                assist->numa_id, assist->core_id);
+            changed = true;
+        } else {
+            dp_netdev_assist_thread_unref(assist);
+        }
+    }
+
+    /* If an assist thread changed, reload all PMDs to pick it up. */
+    if (changed) {
+        CMAP_FOR_EACH (pmd, node, &dp->poll_threads) {
+            if (pmd->core_id == NON_PMD_CORE_ID) {
+                continue;
+            }
+            pmd->need_reload = true;
+        }
+    }
+
+    ovs_numa_dump_destroy(assist_cores);
     ovs_numa_dump_destroy(pmd_cores);
 }
 
@@ -6938,6 +7115,50 @@ pmd_load_queues_and_ports(struct dp_netdev_pmd_thread *pmd,
     return i;
 }
 
+
+static void *
+assist_thread_main(void *f_)
+{
+    struct dp_netdev_assist_thread *assist = f_;
+    bool dpdk_attached;
+    bool exiting;
+    bool reload;
+
+    ovs_numa_thread_setaffinity_core(assist->core_id);
+    dpdk_attached = dpdk_attach_thread(assist->core_id, true);
+
+    for (;;) {
+
+        ovsrcu_try_quiesce();
+
+        xsleep(1); /* TODO: For now just sleep a second. */
+
+        atomic_read_explicit(&assist->reload, &reload, memory_order_acquire);
+        if (OVS_LIKELY(!reload)) {
+            continue;
+        }
+
+        /* Handle configuration updates. */
+
+
+        /* We are done with the configuration update. */
+        atomic_read_relaxed(&assist->exit, &exiting);
+        atomic_store_explicit(&assist->reload, false, memory_order_release);
+        if (exiting) {
+            break;
+        }
+
+        if (!dpdk_attached) {
+            dpdk_attached = dpdk_attach_thread(assist->core_id, true);
+        }
+    }
+
+    if (dpdk_attached) {
+        dpdk_detach_thread(true);
+    }
+    return NULL;
+}
+
 static void *
 pmd_thread_main(void *f_)
 {
@@ -6960,7 +7181,7 @@ pmd_thread_main(void *f_)
     /* Stores the pmd thread's 'pmd' to 'per_pmd_key'. */
     ovsthread_setspecific(pmd->dp->per_pmd_key, pmd);
     ovs_numa_thread_setaffinity_core(pmd->core_id);
-    dpdk_attached = dpdk_attach_thread(pmd->core_id);
+    dpdk_attached = dpdk_attach_thread(pmd->core_id, false);
     poll_cnt = pmd_load_queues_and_ports(pmd, &poll_list);
     dfc_cache_init(&pmd->flow_cache);
     pmd_alloc_static_tx_qid(pmd);
@@ -6973,8 +7194,11 @@ reload:
     atomic_store_relaxed(&pmd->intrvl_cycles, 0);
 
     if (!dpdk_attached) {
-        dpdk_attached = dpdk_attach_thread(pmd->core_id);
+        dpdk_attached = dpdk_attach_thread(pmd->core_id, false);
     }
+
+    dp_netdev_assist_thread_unref(pmd->assist_thread);
+    pmd->assist_thread = dp_netdev_get_assist_thread_for_pmd(pmd);
 
     /* List port/core affinity */
     for (i = 0; i < poll_cnt; i++) {
@@ -7135,12 +7359,13 @@ reload:
         goto reload;
     }
 
+    dp_netdev_assist_thread_unref(pmd->assist_thread);
     pmd_free_static_tx_qid(pmd);
     dfc_cache_uninit(&pmd->flow_cache);
     free(poll_list);
     pmd_free_cached_ports(pmd);
     if (dpdk_attached) {
-        dpdk_detach_thread();
+        dpdk_detach_thread(false);
     }
     return NULL;
 }
@@ -7556,6 +7781,7 @@ dp_netdev_configure_pmd(struct dp_netdev_pmd_thread *pmd, struct dp_netdev *dp,
     pmd->numa_id = numa_id;
     pmd->need_reload = false;
     pmd->n_output_batches = 0;
+    pmd->assist_thread = NULL;
 
     ovs_refcount_init(&pmd->ref_cnt);
     atomic_init(&pmd->exit, false);
@@ -7714,6 +7940,130 @@ dp_netdev_pmd_clear_ports(struct dp_netdev_pmd_thread *pmd)
         ovsrcu_postpone(free, tx);
     }
     ovs_mutex_unlock(&pmd->bond_mutex);
+}
+
+/* Finds and refs the dp_netdev_assist_thread on core 'core_id'.  Returns
+ * the pointer if succeeds, otherwise, NULL.
+ *
+ * Caller must unrefs the returned reference.  */
+static struct dp_netdev_assist_thread *
+dp_netdev_get_assist_thread(struct dp_netdev *dp, unsigned core_id)
+{
+    struct dp_netdev_assist_thread *assist;
+
+    CMAP_FOR_EACH_WITH_HASH (assist, node, hash_int(core_id, 0),
+                             &dp->assist_threads) {
+        if (assist->core_id == core_id) {
+            return dp_netdev_assist_thread_try_ref(assist) ? assist : NULL;
+        }
+    }
+
+    return NULL;
+}
+
+static struct dp_netdev_assist_thread *
+dp_netdev_get_assist_thread_for_pmd(struct dp_netdev_pmd_thread *pmd)
+{
+    struct dp_netdev_assist_thread *assist;
+    struct dp_netdev_assist_thread *lowest = NULL;
+
+    if (!pmd) {
+        return NULL;
+    }
+
+    CMAP_FOR_EACH (assist, node, &pmd->dp->assist_threads) {
+        if (assist->numa_id == pmd->numa_id) {
+            return dp_netdev_assist_thread_try_ref(assist) ? assist : NULL;
+        }
+        if (!lowest || assist->core_id < lowest->core_id) {
+            lowest = assist;
+        }
+    }
+
+    if (lowest) {
+        return dp_netdev_assist_thread_try_ref(lowest) ? lowest : NULL;
+    }
+    return NULL;
+}
+
+/* Caller must have valid pointer to 'assist'. */
+static bool
+dp_netdev_assist_thread_try_ref(struct dp_netdev_assist_thread *assist)
+{
+    return ovs_refcount_try_ref_rcu(&assist->ref_cnt);
+}
+
+static void
+dp_netdev_assist_thread_unref(struct dp_netdev_assist_thread *assist)
+{
+    if (assist && ovs_refcount_unref(&assist->ref_cnt) == 1) {
+        ovsrcu_postpone(dp_netdev_destroy_assist_thread, assist);
+    }
+}
+
+/* Configures the 'assist thread' based on the input argument. */
+static void
+dp_netdev_configure_assist_thread(struct dp_netdev_assist_thread *assist,
+                                  struct dp_netdev *dp,
+                                  unsigned core_id, int numa_id)
+{
+    assist->dp = dp;
+    ovs_refcount_init(&assist->ref_cnt);
+
+    atomic_init(&assist->reload, false);
+    atomic_init(&assist->exit, false);
+    assist->need_reload = false;
+
+    assist->core_id = core_id;
+    assist->numa_id = numa_id;
+
+    cmap_insert(&dp->assist_threads, CONST_CAST(struct cmap_node *,
+                                                &assist->node),
+                hash_int(core_id, 0));
+}
+
+static void
+dp_netdev_destroy_assist_thread(struct dp_netdev_assist_thread *assist)
+{
+    free(assist);
+}
+
+/* Stops the pmd assist thread, removes it from the 'dp->assist_threads',
+ * and unrefs the struct. */
+static void
+dp_netdev_del_assist_thread(struct dp_netdev_assist_thread *assist)
+{
+    atomic_store_relaxed(&assist->exit, true);
+    dp_netdev_reload_assist_thread__(assist);
+    xpthread_join(assist->thread, NULL);
+
+    cmap_remove(&assist->dp->assist_threads, &assist->node,
+                hash_int(assist->core_id, 0));
+    dp_netdev_assist_thread_unref(assist);
+}
+
+static void
+dp_netdev_destroy_all_assist_threads(struct dp_netdev *dp)
+{
+    struct dp_netdev_assist_thread *assist;
+    struct dp_netdev_assist_thread **assist_list;
+    size_t k = 0, n_assists;
+
+    n_assists = cmap_count(&dp->assist_threads);
+    assist_list = xcalloc(n_assists, sizeof *assist_list);
+
+    CMAP_FOR_EACH (assist, node, &dp->assist_threads) {
+        /* We cannot call dp_netdev_del_assist_thread(), since it alters
+         * 'dp->assist_threads' (while we're iterating it) and it
+         * might quiesce. */
+        ovs_assert(k < n_assists);
+        assist_list[k++] = assist;
+    }
+
+    for (size_t i = 0; i < k; i++) {
+        dp_netdev_del_assist_thread(assist_list[i]);
+    }
+    free(assist_list);
 }
 
 /* Adds rx queue to poll_list of PMD thread, if it's not there already. */

@@ -36,8 +36,8 @@ struct smap;
 struct ovsrec_open_vswitch;
 
 void dpdk_init(const struct smap *ovs_other_config);
-bool dpdk_attach_thread(unsigned cpu);
-void dpdk_detach_thread(void);
+bool dpdk_attach_thread(unsigned cpu, bool assist_thread);
+void dpdk_detach_thread(bool assist_thread);
 bool dpdk_available(void);
 void print_dpdk_version(void);
 void dpdk_status(const struct ovsrec_open_vswitch *);

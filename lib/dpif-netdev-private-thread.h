@@ -226,6 +226,29 @@ struct dp_netdev_pmd_thread {
 
     /* Next time when PMD should try RCU quiescing. */
     long long next_rcu_quiesce;
+
+    /* Pointer to the PMD assist thread if in use. */
+    struct dp_netdev_assist_thread *assist_thread;
+};
+
+/* PMD Assist Thread Structures */
+
+struct dp_netdev_assist_thread {
+    struct dp_netdev *dp;
+    struct ovs_refcount ref_cnt;    /* Every reference must be refcount'ed. */
+    struct cmap_node node;          /* In 'dp->assist_threads'.             */
+
+    /* These are atomic variables used as a synchronization and
+     * configuration points for thread reload/exit. See comments in the
+     * dp_netdev_pmd_thread structure above. */
+    atomic_bool reload;             /* Do we need to a config reload?       */
+    atomic_bool exit;               /* For terminating the pmd thread.      */
+    bool need_reload;               /* Set to true if we want a reload.     */
+
+    /* Thread specific variables. */
+    pthread_t thread;
+    unsigned core_id;               /* CPU core id of this pmd thread.      */
+    int numa_id;                    /* numa node id of this pmd thread.     */
 };
 
 #ifdef  __cplusplus
