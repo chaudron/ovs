@@ -249,7 +249,24 @@ struct dp_netdev_assist_thread {
     pthread_t thread;
     unsigned core_id;               /* CPU core id of this pmd thread.      */
     int numa_id;                    /* numa node id of this pmd thread.     */
+
+    /* Assist ring used for receiving messages. */
+    ATOMIC(struct rte_ring *) msg_ring;
+    struct rte_ring *_msg_ring;     /* Private copy of the msg_ring */
 };
+
+enum dp_netdev_assis_msg_types {
+    ASSIST_MSG_NOP = 0,
+};
+
+struct dp_netdev_assist_msg {
+    uint16_t msg_type;
+    uint16_t reserved;
+    union {
+        void *user_pointer;
+    } data;
+};
+BUILD_ASSERT_DECL(IS_POW2(sizeof(struct dp_netdev_assist_msg)));
 
 #ifdef  __cplusplus
 }

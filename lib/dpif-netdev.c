@@ -97,7 +97,9 @@ VLOG_DEFINE_THIS_MODULE(dpif_netdev);
 #define MAX_ALB_REBALANCE_INTERVAL   20000 /* 20000 Min */
 #define MIN_TO_MSEC                  60000
 
-#define FLOW_DUMP_MAX_BATCH 50
+#define FLOW_DUMP_MAX_BATCH          50
+#define ASSIST_MSG_QUEUE_MAX_BATCH   32
+#define ASSIST_MSG_QUEUE_SIZE        1024
 /* Use per thread recirc_depth to prevent recirculation loop. */
 #define MAX_RECIRC_DEPTH 6
 DEFINE_STATIC_PER_THREAD_DATA(uint32_t, recirc_depth, 0)
@@ -639,6 +641,15 @@ static bool
 dp_netdev_assist_thread_try_ref(struct dp_netdev_assist_thread *assist);
 static void
 dp_netdev_assist_thread_unref(struct dp_netdev_assist_thread *assist);
+static void
+pmd_assist_process_msg_queue(struct dp_netdev_assist_thread *assist,
+                             int n_msgs);
+static void
+pmd_assist_flush_msg_queue(struct dp_netdev_assist_thread *assist);
+static struct dp_netdev_assist_msg *
+pmd_assist_reserve_single_msg(struct dp_netdev_assist_thread *assist);
+static void
+pmd_assist_commit_single_msg(struct dp_netdev_assist_thread *assist);
 static void
 dp_netdev_rxq_set_cycles(struct dp_netdev_rxq *rx,
                          enum rxq_cycles_counter_type type,
@@ -7120,6 +7131,8 @@ static void *
 assist_thread_main(void *f_)
 {
     struct dp_netdev_assist_thread *assist = f_;
+    struct ds ring_name = DS_EMPTY_INITIALIZER;
+    struct rte_ring *msg_ring;
     bool dpdk_attached;
     bool exiting;
     bool reload;
@@ -7127,12 +7140,47 @@ assist_thread_main(void *f_)
     ovs_numa_thread_setaffinity_core(assist->core_id);
     dpdk_attached = dpdk_attach_thread(assist->core_id, true);
 
+    ds_put_format(&ring_name, "assist_ring_%d", assist->core_id);
+    msg_ring = dpdk_ring_create_elem(ds_cstr(&ring_name),
+                                     sizeof(struct dp_netdev_assist_msg),
+                                     ASSIST_MSG_QUEUE_SIZE,
+                                     RING_F_MP_HTS_ENQ | RING_F_SC_DEQ);
+    ds_destroy(&ring_name);
+
+    if (!msg_ring) {
+#ifdef DPDK_NETDEV
+        VLOG_ERR("Failed allocating assist thread message ring on core %d",
+                 assist->core_id);
+#else
+        VLOG_ERR("PMD assist threads are only supported when compiled with "
+                 "DPDK support!");
+#endif
+        goto error_exit;
+    }
+    atomic_store_relaxed(&assist->msg_ring, msg_ring);
+    assist->_msg_ring = msg_ring;
+
+    /* TODO: Simple message API test. */
+    if (true) {
+        struct dp_netdev_assist_msg *msg;
+
+        for (int i = 0; i < ASSIST_MSG_QUEUE_SIZE + 10; i++) {
+            msg = pmd_assist_reserve_single_msg(assist);
+            if (msg) {
+                msg->msg_type = ASSIST_MSG_NOP;
+                pmd_assist_commit_single_msg(assist);
+            }
+        }
+    }
+
     for (;;) {
 
         ovsrcu_try_quiesce();
 
-        xsleep(1); /* TODO: For now just sleep a second. */
+        /* Process the message queue. */
+        pmd_assist_process_msg_queue(assist, ASSIST_MSG_QUEUE_MAX_BATCH);
 
+        /* Check if we need a configuration reload. */
         atomic_read_explicit(&assist->reload, &reload, memory_order_acquire);
         if (OVS_LIKELY(!reload)) {
             continue;
@@ -7153,6 +7201,15 @@ assist_thread_main(void *f_)
         }
     }
 
+    if (msg_ring) {
+        atomic_store_relaxed(&assist->msg_ring, NULL);
+        /* We can not free the ring here, as PMD threads could still user it
+         * to enqueue messages. We will free it as part of the
+         * dp_netdev_destroy_assist_thread() callback as we know for sure none
+         * of the PMDs hold a reference to the assist thread. */
+    }
+
+error_exit:
     if (dpdk_attached) {
         dpdk_detach_thread(true);
     }
@@ -8025,6 +8082,10 @@ dp_netdev_configure_assist_thread(struct dp_netdev_assist_thread *assist,
 static void
 dp_netdev_destroy_assist_thread(struct dp_netdev_assist_thread *assist)
 {
+    if (assist->_msg_ring) {
+        pmd_assist_flush_msg_queue(assist);
+        dpdk_ring_free(assist->_msg_ring);
+    }
     free(assist);
 }
 
@@ -10563,4 +10624,127 @@ dpcls_lookup(struct dpcls *cls, const struct netdev_flow_key *keys[],
         *num_lookups_p = lookups_match;
     }
     return false;
+}
+
+/* Reserve a single message on the queue. */
+static struct dp_netdev_assist_msg *
+pmd_assist_reserve_single_msg(struct dp_netdev_assist_thread *assist)
+{
+    struct rte_ring_zc_data zcd;
+    struct rte_ring *ring;
+    int n;
+
+    atomic_read_relaxed(&assist->msg_ring, &ring);
+    if (!ring) {
+        return NULL;
+    }
+
+    n = dpdk_ring_enqueue_zc_bulk_elem_start(ring,
+                                             sizeof(
+                                                 struct dp_netdev_assist_msg),
+                                             1, &zcd, NULL);
+
+    if (n <= 0) {
+        return NULL; /* No room in the ring buffer. */
+    }
+
+    if (zcd.n1 > 0) {
+        return zcd.ptr1;
+    }
+    return zcd.ptr2;
+}
+
+/* Commit previously reserved message to the ring. */
+static void
+pmd_assist_commit_single_msg(struct dp_netdev_assist_thread *assist)
+{
+    struct rte_ring *ring;
+
+    atomic_read_relaxed(&assist->msg_ring, &ring);
+    if (!ring) {
+        /* If this happens the assist thread is about to go away. However
+         * if we do not finish this element the queue can not be flushed, so
+         * we use the private instance, which is safe as we still hold a
+         * reference to the assist thread. */
+         ring = assist->_msg_ring;
+    }
+
+    dpdk_ring_enqueue_zc_elem_finish(ring, 1);
+}
+
+/* Assist message callback function definition. */
+typedef void (*assist_msg_callback)(struct dp_netdev_assist_thread *assist,
+                                    struct dp_netdev_assist_msg *msg);
+
+/* Process a maximum of n_msgs messages from the assist message queue. */
+static void
+_pmd_assist_process_msg_queue(struct dp_netdev_assist_thread *assist,
+                              int n_msgs, assist_msg_callback callback)
+{
+    struct rte_ring *ring = assist->_msg_ring;
+    struct dp_netdev_assist_msg *msg;
+    struct rte_ring_zc_data zcd;
+    unsigned int n;
+
+    n = dpdk_ring_dequeue_zc_burst_elem_start(ring,
+                                              sizeof(
+                                                  struct dp_netdev_assist_msg),
+                                              n_msgs, &zcd, NULL);
+    if (n == 0) {
+        return;
+    }
+
+    msg = zcd.ptr1;
+    for (int i = 0; i < zcd.n1; i++, msg++) {
+        callback(assist, msg);
+    }
+
+    if (zcd.n1 < n) {
+        msg = zcd.ptr2;
+        for (int i = 0; i < (n - zcd.n1); i++, msg++) {
+            callback(assist, msg);
+        }
+    }
+
+    dpdk_ring_dequeue_zc_finish(ring, n);
+}
+
+/* Flush a single message, i.e., no actions, just free the resources! */
+static void pmd_assist_flush_single_msg(
+    struct dp_netdev_assist_thread *assist OVS_UNUSED,
+    struct dp_netdev_assist_msg *msg)
+{
+    switch ((enum dp_netdev_assis_msg_types) msg->msg_type) {
+    case ASSIST_MSG_NOP:
+        break;
+    }
+}
+
+/* Flush all message from the message queue, i.e. free resources. */
+static void
+pmd_assist_flush_msg_queue(struct dp_netdev_assist_thread *assist)
+{
+    do {
+        _pmd_assist_process_msg_queue(assist, ASSIST_MSG_QUEUE_SIZE,
+                                      pmd_assist_flush_single_msg);
+    } while (!dpdk_ring_empty(assist->_msg_ring));
+}
+
+static void
+pmd_assist_process_single_msg(struct dp_netdev_assist_thread *assist
+                              OVS_UNUSED, struct dp_netdev_assist_msg *msg)
+{
+    switch ((enum dp_netdev_assis_msg_types) msg->msg_type) {
+    case ASSIST_MSG_NOP:
+        break;
+    }
+}
+
+/* Process a maximum of n_msgs messages from the assist message queue. */
+static void
+pmd_assist_process_msg_queue(struct dp_netdev_assist_thread *assist,
+                             int n_msgs)
+{
+    _pmd_assist_process_msg_queue(assist, n_msgs,
+                                  pmd_assist_process_single_msg);
 }

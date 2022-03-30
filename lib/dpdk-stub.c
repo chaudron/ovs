@@ -68,3 +68,16 @@ dpdk_status(const struct ovsrec_open_vswitch *cfg)
         ovsrec_open_vswitch_set_dpdk_version(cfg, "none");
     }
 }
+
+struct rte_ring *
+dpdk_ring_create_elem(const char *name OVS_UNUSED,
+                      unsigned int esize OVS_UNUSED,
+                      unsigned int count OVS_UNUSED,
+                      unsigned int flags OVS_UNUSED)
+{
+    return NULL;
+}
+
+void dpdk_ring_free(struct rte_ring *r OVS_UNUSED)
+{
+}

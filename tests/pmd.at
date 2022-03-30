@@ -1333,7 +1333,9 @@ AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:pmd-cpu-mask=0x1 -- set Open
 OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 0, core id:  1 destroyed"])
 OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 1, core id:  3 destroyed"])
 
-OVS_VSWITCHD_STOP(["/Invalid pmd-assist-mask configuration/d"])
+OVS_VSWITCHD_STOP(["/Invalid pmd-assist-mask configuration/d
+/Failed allocating assist thread message ring on core/d
+/PMD assist threads are only supported when compiled with DPDK support/d"])
 AT_CLEANUP
 
 
@@ -1360,5 +1362,7 @@ AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:pmd-assist-mask=0x8])
 OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 1, core id:  2 destroyed"])
 OVS_WAIT_UNTIL([tail -n +$TMP ovs-vswitchd.log | grep "PMD assist thread on numa_id: 2, core id:  3 created"])
 
-OVS_VSWITCHD_STOP(["/Invalid pmd-assist-mask configuration/d"])
+OVS_VSWITCHD_STOP(["/Invalid pmd-assist-mask configuration/d
+/Failed allocating assist thread message ring on core/d
+/PMD assist threads are only supported when compiled with DPDK support/d"])
 AT_CLEANUP

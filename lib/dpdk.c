@@ -538,3 +538,21 @@ dpdk_status(const struct ovsrec_open_vswitch *cfg)
         ovsrec_open_vswitch_set_dpdk_version(cfg, rte_version());
     }
 }
+
+struct rte_ring *
+dpdk_ring_create_elem(const char *name, unsigned int esize, unsigned int count,
+                      unsigned int flags)
+{
+    unsigned lcore_id = rte_lcore_id();
+
+    return rte_ring_create_elem(name, esize, count,
+                                lcore_id == LCORE_ID_ANY ? SOCKET_ID_ANY :
+                                rte_lcore_to_socket_id(lcore_id),
+                                flags);
+}
+
+void dpdk_ring_free(struct rte_ring *r)
+{
+    rte_ring_free(r);
+}
+
