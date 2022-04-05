@@ -641,7 +641,7 @@ static bool
 dp_netdev_assist_thread_try_ref(struct dp_netdev_assist_thread *assist);
 static void
 dp_netdev_assist_thread_unref(struct dp_netdev_assist_thread *assist);
-static void
+static int
 pmd_assist_process_msg_queue(struct dp_netdev_assist_thread *assist,
                              int n_msgs);
 static void
@@ -739,15 +739,16 @@ enum pmd_info_type {
 };
 
 static void
-format_pmd_thread(struct ds *reply, struct dp_netdev_pmd_thread *pmd)
+format_thread(struct ds *reply, unsigned core_id, int numa_id,
+              bool assist_thread)
 {
-    ds_put_cstr(reply, (pmd->core_id == NON_PMD_CORE_ID)
-                        ? "main thread" : "pmd thread");
-    if (pmd->numa_id != OVS_NUMA_UNSPEC) {
-        ds_put_format(reply, " numa_id %d", pmd->numa_id);
+    ds_put_cstr(reply, (core_id == NON_PMD_CORE_ID) ? "main thread" :
+                assist_thread ? "assist thread" : "pmd thread");
+    if (numa_id != OVS_NUMA_UNSPEC) {
+        ds_put_format(reply, " numa_id %d", numa_id);
     }
-    if (pmd->core_id != OVS_CORE_UNSPEC && pmd->core_id != NON_PMD_CORE_ID) {
-        ds_put_format(reply, " core_id %u", pmd->core_id);
+    if (core_id != OVS_CORE_UNSPEC && core_id != NON_PMD_CORE_ID) {
+        ds_put_format(reply, " core_id %u", core_id);
     }
     ds_put_cstr(reply, ":\n");
 }
@@ -767,7 +768,7 @@ pmd_info_show_stats(struct ds *reply,
                          + stats[PMD_CYCLES_ITER_BUSY];
     total_packets = stats[PMD_STAT_RECV];
 
-    format_pmd_thread(reply, pmd);
+    format_thread(reply, pmd->core_id, pmd->numa_id, false);
 
     if (total_packets > 0) {
         passes_per_pkt = (total_packets + stats[PMD_STAT_RECIRC])
@@ -843,18 +844,18 @@ pmd_info_show_perf(struct ds *reply,
         char *time_str =
                 xastrftime_msec("%H:%M:%S.###", time_wall_msec(), true);
         long long now = time_msec();
-        double duration = (now - pmd->perf_stats.start_ms) / 1000.0;
+        double duration = (now - pmd->perf_stats.common.start_ms) / 1000.0;
 
         ds_put_cstr(reply, "\n");
         ds_put_format(reply, "Time: %s\n", time_str);
         ds_put_format(reply, "Measurement duration: %.3f s\n", duration);
         ds_put_cstr(reply, "\n");
-        format_pmd_thread(reply, pmd);
+        format_thread(reply, pmd->core_id, pmd->numa_id, false);
         ds_put_cstr(reply, "\n");
         pmd_perf_format_overall_stats(reply, &pmd->perf_stats, duration);
         if (pmd_perf_metrics_enabled(pmd)) {
             /* Prevent parallel clearing of perf metrics. */
-            ovs_mutex_lock(&pmd->perf_stats.clear_mutex);
+            ovs_mutex_lock(&pmd->perf_stats.common.clear_mutex);
             if (par->histograms) {
                 ds_put_cstr(reply, "\n");
                 pmd_perf_format_histograms(reply, &pmd->perf_stats);
@@ -869,10 +870,49 @@ pmd_info_show_perf(struct ds *reply,
                 pmd_perf_format_ms_history(reply, &pmd->perf_stats,
                         par->ms_hist_len);
             }
-            ovs_mutex_unlock(&pmd->perf_stats.clear_mutex);
+            ovs_mutex_unlock(&pmd->perf_stats.common.clear_mutex);
         }
         free(time_str);
     }
+}
+
+static void
+pmd_assist_info_show_perf(struct ds *reply,
+                          struct dp_netdev_assist_thread *assist,
+                          struct pmd_perf_params *par)
+{
+    char *time_str =
+        xastrftime_msec("%H:%M:%S.###", time_wall_msec(), true);
+    long long now = time_msec();
+    double duration = (now - assist->perf_stats.common.start_ms) / 1000.0;
+
+    ds_put_cstr(reply, "\n");
+    ds_put_format(reply, "Time: %s\n", time_str);
+    ds_put_format(reply, "Measurement duration: %.3f s\n", duration);
+    ds_put_cstr(reply, "\n");
+    format_thread(reply, assist->core_id, assist->numa_id, true);
+    ds_put_cstr(reply, "\n");
+    assist_perf_format_overall_stats(reply, &assist->perf_stats, duration);
+
+    /* Prevent parallel clearing of perf metrics. */
+    ovs_mutex_lock(&assist->perf_stats.common.clear_mutex);
+    if (par->histograms) {
+        ds_put_cstr(reply, "\n");
+        assist_perf_format_histograms(reply, &assist->perf_stats);
+    }
+    if (par->iter_hist_len > 0) {
+        ds_put_cstr(reply, "\n");
+        assist_perf_format_iteration_history(reply, &assist->perf_stats,
+                                             par->iter_hist_len);
+    }
+    if (par->ms_hist_len > 0) {
+        ds_put_cstr(reply, "\n");
+        assist_perf_format_ms_history(reply, &assist->perf_stats,
+                                      par->ms_hist_len);
+    }
+    ovs_mutex_unlock(&assist->perf_stats.common.clear_mutex);
+
+    free(time_str);
 }
 
 static int
@@ -1014,6 +1054,23 @@ compare_poll_thread_list(const void *a_, const void *b_)
     return 0;
 }
 
+static int
+compare_assist_thread_list(const void *a_, const void *b_)
+{
+    const struct dp_netdev_assist_thread *a, *b;
+
+    a = *(struct dp_netdev_assist_thread **) a_;
+    b = *(struct dp_netdev_assist_thread **) b_;
+
+    if (a->core_id < b->core_id) {
+        return -1;
+    }
+    if (a->core_id > b->core_id) {
+        return 1;
+    }
+    return 0;
+}
+
 /* Create a sorted list of pmd's from the dp->poll_threads cmap. We can use
  * this list, as long as we do not go to quiescent state. */
 static void
@@ -1038,6 +1095,33 @@ sorted_poll_thread_list(struct dp_netdev *dp,
     qsort(pmd_list, k, sizeof *pmd_list, compare_poll_thread_list);
 
     *list = pmd_list;
+    *n = k;
+}
+
+/* Create a sorted list of assist threads from the dp->assist_threads cmap.
+ * We can use this list, as long as we do not go to quiescent state. */
+static void
+sorted_assist_thread_list(struct dp_netdev *dp,
+                          struct dp_netdev_assist_thread ***list,
+                          size_t *n)
+{
+    struct dp_netdev_assist_thread **assist_list;
+    struct dp_netdev_assist_thread *assist;
+    size_t k = 0, n_assists;
+
+    n_assists = cmap_count(&dp->assist_threads);
+    assist_list = xcalloc(n_assists, sizeof *assist_list);
+
+    CMAP_FOR_EACH (assist, node, &dp->assist_threads) {
+        if (k >= n_assists) {
+            break;
+        }
+        assist_list[k++] = assist;
+    }
+
+    qsort(assist_list, k, sizeof *assist_list, compare_assist_thread_list);
+
+    *list = assist_list;
     *n = k;
 }
 
@@ -1466,6 +1550,7 @@ static void
 dpif_netdev_pmd_info(struct unixctl_conn *conn, int argc, const char *argv[],
                      void *aux)
 {
+    struct dp_netdev_assist_thread **assist_list;
     struct ds reply = DS_EMPTY_INITIALIZER;
     struct dp_netdev_pmd_thread **pmd_list;
     struct dp_netdev *dp = NULL;
@@ -1545,6 +1630,26 @@ dpif_netdev_pmd_info(struct unixctl_conn *conn, int argc, const char *argv[],
         }
     }
     free(pmd_list);
+
+    sorted_assist_thread_list(dp, &assist_list, &n);
+    for (size_t i = 0; i < n; i++) {
+        struct dp_netdev_assist_thread *assist = assist_list[i];
+        if (!assist) {
+            break;
+        }
+
+        if (filter_on_pmd && assist->core_id != core_id) {
+            continue;
+        }
+        if (type == PMD_INFO_PERF_SHOW) {
+            pmd_assist_info_show_perf(&reply, assist,
+                                      (struct pmd_perf_params *) aux);
+        } else if (type == PMD_INFO_CLEAR_STATS) {
+            assist_perf_stats_clear(&assist->perf_stats);
+        }
+    }
+    free(assist_list);
+
 
     ovs_mutex_unlock(&dp_netdev_mutex);
 
@@ -5324,7 +5429,7 @@ dp_netdev_pmd_flush_output_on_port(struct dp_netdev_pmd_thread *pmd,
     uint64_t cycles;
     uint32_t tx_flush_interval;
 
-    cycle_timer_start(&pmd->perf_stats, &timer);
+    cycle_timer_start(&pmd->perf_stats.common, &timer);
 
     output_cnt = dp_packet_batch_size(&p->output_pkts);
     ovs_assert(output_cnt > 0);
@@ -5380,7 +5485,7 @@ dp_netdev_pmd_flush_output_on_port(struct dp_netdev_pmd_thread *pmd,
 
     /* Distribute send cycles evenly among transmitted packets and assign to
      * their respective rx queues. */
-    cycles = cycle_timer_stop(&pmd->perf_stats, &timer) / output_cnt;
+    cycles = cycle_timer_stop(&pmd->perf_stats.common, &timer) / output_cnt;
     for (i = 0; i < output_cnt; i++) {
         if (p->output_pkts_rxqs[i]) {
             dp_netdev_rxq_add_cycles(p->output_pkts_rxqs[i],
@@ -5425,7 +5530,7 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
     uint64_t cycles;
 
     /* Measure duration for polling and processing rx burst. */
-    cycle_timer_start(&pmd->perf_stats, &timer);
+    cycle_timer_start(&pmd->perf_stats.common, &timer);
 
     pmd->ctx.last_rxq = rxq;
     dp_packet_batch_init(&batch);
@@ -5443,13 +5548,13 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
         batch_cnt = dp_packet_batch_size(&batch);
         if (pmd_perf_metrics_enabled(pmd)) {
             /* Update batch histogram. */
-            s->current.batches++;
+            s->current.pmd.batches++;
             histogram_add_sample(&s->pkts_per_batch, batch_cnt);
             /* Update the maximum vhost rx queue fill level. */
             if (rxq->is_vhost && rem_qlen >= 0) {
                 uint32_t qfill = batch_cnt + rem_qlen;
-                if (qfill > s->current.max_vhost_qfill) {
-                    s->current.max_vhost_qfill = qfill;
+                if (qfill > s->current.pmd.max_vhost_qfill) {
+                    s->current.pmd.max_vhost_qfill = qfill;
                 }
             }
         }
@@ -5461,13 +5566,13 @@ dp_netdev_process_rxq_port(struct dp_netdev_pmd_thread *pmd,
         }
 
         /* Assign processing cycles to rx queue. */
-        cycles = cycle_timer_stop(&pmd->perf_stats, &timer);
+        cycles = cycle_timer_stop(&pmd->perf_stats.common, &timer);
         dp_netdev_rxq_add_cycles(rxq, RXQ_CYCLES_PROC_CURR, cycles);
 
         dp_netdev_pmd_flush_output_packets(pmd, false);
     } else {
         /* Discard cycles. */
-        cycle_timer_stop(&pmd->perf_stats, &timer);
+        cycle_timer_stop(&pmd->perf_stats.common, &timer);
         if (error != EAGAIN && error != EOPNOTSUPP) {
             static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 5);
 
@@ -7132,6 +7237,7 @@ assist_thread_main(void *f_)
 {
     struct dp_netdev_assist_thread *assist = f_;
     struct ds ring_name = DS_EMPTY_INITIALIZER;
+    unsigned int idle_iterations = 0;
     struct rte_ring *msg_ring;
     bool dpdk_attached;
     bool exiting;
@@ -7167,18 +7273,35 @@ assist_thread_main(void *f_)
         for (int i = 0; i < ASSIST_MSG_QUEUE_SIZE + 10; i++) {
             msg = pmd_assist_reserve_single_msg(assist);
             if (msg) {
-                msg->msg_type = ASSIST_MSG_NOP;
+                msg->msg_type = ASSIST_MSG_NOP + (i & 1);
                 pmd_assist_commit_single_msg(assist);
             }
         }
     }
 
+    ovs_mutex_lock(&assist->perf_stats.common.stats_mutex);
     for (;;) {
+        int n_msgs;
+
+        assist_perf_start_iteration(&assist->perf_stats);
 
         ovsrcu_try_quiesce();
 
         /* Process the message queue. */
-        pmd_assist_process_msg_queue(assist, ASSIST_MSG_QUEUE_MAX_BATCH);
+        histogram_add_sample(&assist->perf_stats.queue_depth,
+                             dpdk_ring_count(msg_ring));
+
+        n_msgs = pmd_assist_process_msg_queue(assist,
+                                              ASSIST_MSG_QUEUE_MAX_BATCH);
+        if (!n_msgs) {
+            idle_iterations++;
+        } else {
+             histogram_add_sample(&assist->perf_stats.continuous_empty_poll,
+                                  idle_iterations);
+            idle_iterations = 0;
+        }
+
+        assist_perf_end_iteration(&assist->perf_stats, n_msgs);
 
         /* Check if we need a configuration reload. */
         atomic_read_explicit(&assist->reload, &reload, memory_order_acquire);
@@ -7200,6 +7323,7 @@ assist_thread_main(void *f_)
             dpdk_attached = dpdk_attach_thread(assist->core_id, true);
         }
     }
+    ovs_mutex_unlock(&assist->perf_stats.common.stats_mutex);
 
     if (msg_ring) {
         atomic_store_relaxed(&assist->msg_ring, NULL);
@@ -7288,12 +7412,12 @@ reload:
         atomic_store_relaxed(&pmd->busy_cycles_intrvl[i], 0);
     }
     atomic_count_set(&pmd->intrvl_idx, 0);
-    cycles_counter_update(s);
+    cycles_counter_update(&s->common);
 
     pmd->next_rcu_quiesce = pmd->ctx.now + PMD_RCU_QUIESCE_INTERVAL;
 
     /* Protect pmd stats from external clearing while polling. */
-    ovs_mutex_lock(&pmd->perf_stats.stats_mutex);
+    ovs_mutex_lock(&pmd->perf_stats.common.stats_mutex);
     for (;;) {
         uint64_t rx_packets = 0, tx_packets = 0;
         uint64_t time_slept = 0;
@@ -7341,9 +7465,10 @@ reload:
             if (sleep_time) {
                 struct cycle_timer sleep_timer;
 
-                cycle_timer_start(&pmd->perf_stats, &sleep_timer);
+                cycle_timer_start(&pmd->perf_stats.common, &sleep_timer);
                 xnanosleep_no_quiesce(sleep_time * 1000);
-                time_slept = cycle_timer_stop(&pmd->perf_stats, &sleep_timer);
+                time_slept = cycle_timer_stop(&pmd->perf_stats.common,
+                                              &sleep_timer);
                 pmd_thread_ctx_time_update(pmd);
             }
             if (sleep_time < max_sleep) {
@@ -7397,7 +7522,7 @@ reload:
         pmd_perf_end_iteration(s, rx_packets, tx_packets, time_slept,
                                pmd_perf_metrics_enabled(pmd));
     }
-    ovs_mutex_unlock(&pmd->perf_stats.stats_mutex);
+    ovs_mutex_unlock(&pmd->perf_stats.common.stats_mutex);
 
     poll_cnt = pmd_load_queues_and_ports(pmd, &poll_list);
     atomic_read_relaxed(&pmd->wait_for_reload, &wait_for_reload);
@@ -8073,6 +8198,10 @@ dp_netdev_configure_assist_thread(struct dp_netdev_assist_thread *assist,
 
     assist->core_id = core_id;
     assist->numa_id = numa_id;
+
+    assist_perf_stats_init(&assist->perf_stats, ASSIST_MSG_QUEUE_MAX_BATCH,
+                           ASSIST_MSG_QUEUE_SIZE -
+                           ASSIST_MSG_QUEUE_MAX_BATCH);
 
     cmap_insert(&dp->assist_threads, CONST_CAST(struct cmap_node *,
                                                 &assist->node),
@@ -8773,7 +8902,7 @@ handle_packet_upcall(struct dp_netdev_pmd_thread *pmd,
     struct match match;
     ovs_u128 ufid;
     int error;
-    uint64_t cycles = cycles_counter_update(&pmd->perf_stats);
+    uint64_t cycles = cycles_counter_update(&pmd->perf_stats.common);
     odp_port_t orig_in_port = packet->md.orig_in_port;
 
     match.tun_md.valid = false;
@@ -8833,10 +8962,10 @@ handle_packet_upcall(struct dp_netdev_pmd_thread *pmd,
     }
     if (pmd_perf_metrics_enabled(pmd)) {
         /* Update upcall stats. */
-        cycles = cycles_counter_update(&pmd->perf_stats) - cycles;
+        cycles = cycles_counter_update(&pmd->perf_stats.common) - cycles;
         struct pmd_perf_stats *s = &pmd->perf_stats;
-        s->current.upcalls++;
-        s->current.upcall_cycles += cycles;
+        s->current.pmd.upcalls++;
+        s->current.pmd.upcall_cycles += cycles;
         histogram_add_sample(&s->cycles_per_upcall, cycles);
     }
     return error;
@@ -10427,7 +10556,7 @@ dp_netdev_pmd_try_optimize(struct dp_netdev_pmd_thread *pmd,
             dp_netdev_rxq_set_cycles(poll_list[i].rxq, RXQ_CYCLES_PROC_CURR,
                                      0);
         }
-        curr_tsc = cycles_counter_update(&pmd->perf_stats);
+        curr_tsc = cycles_counter_update(&pmd->perf_stats.common);
         if (pmd->intrvl_tsc_prev) {
             /* There is a prev timestamp, store a new intrvl cycle count. */
             atomic_store_relaxed(&pmd->intrvl_cycles,
@@ -10677,7 +10806,7 @@ typedef void (*assist_msg_callback)(struct dp_netdev_assist_thread *assist,
                                     struct dp_netdev_assist_msg *msg);
 
 /* Process a maximum of n_msgs messages from the assist message queue. */
-static void
+static int
 _pmd_assist_process_msg_queue(struct dp_netdev_assist_thread *assist,
                               int n_msgs, assist_msg_callback callback)
 {
@@ -10691,7 +10820,7 @@ _pmd_assist_process_msg_queue(struct dp_netdev_assist_thread *assist,
                                                   struct dp_netdev_assist_msg),
                                               n_msgs, &zcd, NULL);
     if (n == 0) {
-        return;
+        return 0;
     }
 
     msg = zcd.ptr1;
@@ -10707,6 +10836,7 @@ _pmd_assist_process_msg_queue(struct dp_netdev_assist_thread *assist,
     }
 
     dpdk_ring_dequeue_zc_finish(ring, n);
+    return n;
 }
 
 /* Flush a single message, i.e., no actions, just free the resources! */
@@ -10716,6 +10846,8 @@ static void pmd_assist_flush_single_msg(
 {
     switch ((enum dp_netdev_assis_msg_types) msg->msg_type) {
     case ASSIST_MSG_NOP:
+        break;
+    case ASSIST_MSG_RCU_QUIESCE:
         break;
     }
 }
@@ -10734,17 +10866,42 @@ static void
 pmd_assist_process_single_msg(struct dp_netdev_assist_thread *assist
                               OVS_UNUSED, struct dp_netdev_assist_msg *msg)
 {
+    struct cycle_timer timer;
+    uint64_t cycles;
+
+    cycle_timer_start(&assist->perf_stats.common, &timer);
+
     switch ((enum dp_netdev_assis_msg_types) msg->msg_type) {
     case ASSIST_MSG_NOP:
+        assist_perf_update_counter(&assist->perf_stats,
+                                   ASSIST_STAT_MSG_NOP, 1);
+        break;
+    case ASSIST_MSG_RCU_QUIESCE:
+        assist_perf_update_counter(&assist->perf_stats,
+                                   ASSIST_STAT_MSG_RCU_QUIESCE, 1);
+        break;
+    }
+
+    cycles =  cycle_timer_stop(&assist->perf_stats.common, &timer);
+
+    switch ((enum dp_netdev_assis_msg_types) msg->msg_type) {
+    case ASSIST_MSG_NOP:
+        assist_perf_update_counter(&assist->perf_stats,
+                                   ASSIST_CYCLES_MSG_NOP, cycles);
+        break;
+    case ASSIST_MSG_RCU_QUIESCE:
+        assist_perf_update_counter(&assist->perf_stats,
+                                   ASSIST_CYCLES_MSG_RCU_QUIESCE,
+                                   cycles);
         break;
     }
 }
 
 /* Process a maximum of n_msgs messages from the assist message queue. */
-static void
+static int
 pmd_assist_process_msg_queue(struct dp_netdev_assist_thread *assist,
                              int n_msgs)
 {
-    _pmd_assist_process_msg_queue(assist, n_msgs,
-                                  pmd_assist_process_single_msg);
+    return _pmd_assist_process_msg_queue(assist, n_msgs,
+                                         pmd_assist_process_single_msg);
 }

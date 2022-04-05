@@ -85,6 +85,17 @@ enum pmd_stat_type {
     PMD_N_STATS
 };
 
+enum assist_stat_type {
+    ASSIST_CYCLES_ITER_IDLE,       /* Cycles spent in idle iterations. */
+    ASSIST_CYCLES_ITER_BUSY,       /* Cycles spent in busy iterations. */
+    ASSIST_STAT_MSGS,              /* Total received messages. */
+    ASSIST_STAT_MSG_NOP,           /* ASSIST_MSG_NOP counter. */
+    ASSIST_STAT_MSG_RCU_QUIESCE,   /* ASSIST_MSG_RCU_QUIESCE counter. */
+    ASSIST_CYCLES_MSG_NOP,         /* ASSIST_MSG_NOP cycles. */
+    ASSIST_CYCLES_MSG_RCU_QUIESCE, /* ASSIST_MSG_RCU_QUIESCE cycles. */
+    ASSIST_N_STATS
+};
+
 /* Array of PMD counters indexed by enum pmd_stat_type.
  * The n[] array contains the actual counter values since initialization
  * of the PMD. Counters are atomically updated from the PMD but are
@@ -95,6 +106,11 @@ enum pmd_stat_type {
 struct pmd_counters {
     atomic_uint64_t n[PMD_N_STATS];     /* Value since _init(). */
     uint64_t zero[PMD_N_STATS];         /* Value at last _clear().  */
+};
+
+struct assist_counters {
+    atomic_uint64_t n[ASSIST_N_STATS];     /* Value since _init(). */
+    uint64_t zero[ASSIST_N_STATS];         /* Value at last _clear().  */
 };
 
 /* Data structure to collect statistical distribution of an integer measurement
@@ -120,11 +136,19 @@ struct iter_stats {
     uint64_t cycles;            /* Number of TSC cycles spent in it. or ms. */
     uint64_t busy_cycles;       /* Cycles spent in busy iterations or ms. */
     uint32_t iterations;        /* Iterations in ms. */
-    uint32_t pkts;              /* Packets processed in iteration or ms. */
-    uint32_t upcalls;           /* Number of upcalls in iteration or ms. */
-    uint32_t upcall_cycles;     /* Cycles spent in upcalls in it. or ms. */
-    uint32_t batches;           /* Number of rx batches in iteration or ms. */
-    uint32_t max_vhost_qfill;   /* Maximum fill level in iteration or ms. */
+    union {
+        struct {
+            uint32_t pkts;            /* Packets processed in iteration/ms. */
+            uint32_t upcalls;         /* Number of upcalls in iteration/ms. */
+            uint32_t upcall_cycles;   /* Cycles spent in upcalls in it./ms. */
+            uint32_t batches;         /* Number of rx batches in it./ms. */
+            uint32_t max_vhost_qfill; /* Maximum fill level in it./ms. */
+        } pmd;
+        struct {
+            uint32_t msgs;            /* Assist msgs processed in it. or ms. */
+            uint32_t queue_depth;     /* Message queue depth in iterations. */
+        } assist;
+    };
 };
 
 #define HISTORY_LEN 1000        /* Length of recorded history
@@ -145,10 +169,10 @@ struct history {
  * clearing. The other metrics may only be safely read with the clear_mutex
  * held to protect against concurrent clearing. */
 
-struct pmd_perf_stats {
-    /* Prevents interference between PMD polling and stats clearing. */
+struct perf_stats_common {
+    /* Prevents interference between thread polling and stats clearing. */
     struct ovs_mutex stats_mutex;
-    /* Set by CLI thread to order clearing of PMD stats. */
+    /* Set by CLI thread to order clearing of thread stats. */
     volatile bool clear;
     /* Prevents stats retrieval while clearing is in progress. */
     struct ovs_mutex clear_mutex;
@@ -158,12 +182,17 @@ struct pmd_perf_stats {
     uint64_t iteration_cnt;
     /* Start of the current iteration. */
     uint64_t start_tsc;
-    /* Latest TSC time stamp taken in PMD. */
+    /* Latest TSC time stamp taken in thread. */
     uint64_t last_tsc;
     /* Used to space certain checks in time. */
     uint64_t next_check_tsc;
-    /* If non-NULL, outermost cycle timer currently running in PMD. */
+    /* If non-NULL, outermost cycle timer currently running in thread. */
     struct cycle_timer *cur_timer;
+};
+
+struct pmd_perf_stats {
+    /* Common perf statistics data structure. */
+    struct perf_stats_common common;
     /* Set of PMD counters with their zero offsets. */
     struct pmd_counters counters;
     /* Statistics of the current iteration. */
@@ -192,9 +221,30 @@ struct pmd_perf_stats {
     char *log_reason;
 };
 
+struct assist_perf_stats {
+    /* Common perf statistics data structure. */
+    struct perf_stats_common common;
+    /* Set of PMD assist counters with their zero offsets. */
+    struct assist_counters counters;
+    /* Statistics of the current iteration. */
+    struct iter_stats current;
+    /* Totals for the current millisecond. */
+    struct iter_stats totals;
+    /* Histograms for the PMD assist metrics. */
+    struct histogram cycles;
+    struct histogram msgs;
+    struct histogram cycles_per_msg;
+    struct histogram queue_depth;
+    struct histogram continuous_empty_poll;
+    /* Iteration history buffer. */
+    struct history iterations;
+    /* Millisecond history buffer. */
+    struct history milliseconds;
+};
+
 #ifdef __linux__
 static inline uint64_t
-rdtsc_syscall(struct pmd_perf_stats *s)
+rdtsc_syscall(struct perf_stats_common *s)
 {
     struct timespec val;
     uint64_t v;
@@ -216,7 +266,7 @@ rdtsc_syscall(struct pmd_perf_stats *s)
  * avoid the overhead of reading the TSC register. */
 
 static inline uint64_t
-cycles_counter_update(struct pmd_perf_stats *s)
+cycles_counter_update(struct perf_stats_common *s)
 {
 #ifdef DPDK_NETDEV
     return s->last_tsc = rte_get_tsc_cycles();
@@ -237,7 +287,7 @@ cycles_counter_update(struct pmd_perf_stats *s)
 }
 
 static inline uint64_t
-cycles_counter_get(struct pmd_perf_stats *s)
+cycles_counter_get(struct perf_stats_common *s)
 {
     return s->last_tsc;
 }
@@ -268,7 +318,7 @@ struct cycle_timer {
 };
 
 static inline void
-cycle_timer_start(struct pmd_perf_stats *s,
+cycle_timer_start(struct perf_stats_common *s,
                   struct cycle_timer *timer)
 {
     struct cycle_timer *cur_timer = s->cur_timer;
@@ -284,7 +334,7 @@ cycle_timer_start(struct pmd_perf_stats *s,
 }
 
 static inline uint64_t
-cycle_timer_stop(struct pmd_perf_stats *s,
+cycle_timer_stop(struct perf_stats_common *s,
                  struct cycle_timer *timer)
 {
     /* Assert that this is the current cycle timer. */
@@ -307,10 +357,18 @@ void pmd_perf_stats_init(struct pmd_perf_stats *s);
 void pmd_perf_stats_clear(struct pmd_perf_stats *s);
 void pmd_perf_stats_clear_lock(struct pmd_perf_stats *s);
 
+void assist_perf_stats_init(struct assist_perf_stats *s,
+                            int dequeue_batch_size, int queue_size);
+void assist_perf_stats_clear(struct assist_perf_stats *s);
+
+
 /* Functions to read and update PMD counters. */
 
 void pmd_perf_read_counters(struct pmd_perf_stats *s,
                             uint64_t stats[PMD_N_STATS]);
+
+void assist_perf_read_counters(struct assist_perf_stats *s,
+                               uint64_t stats[ASSIST_N_STATS]);
 
 /* PMD performance counters are updated lock-less. For real PMDs
  * they are only updated from the PMD thread itself. In the case of the
@@ -324,6 +382,16 @@ void pmd_perf_read_counters(struct pmd_perf_stats *s,
 static inline void
 pmd_perf_update_counter(struct pmd_perf_stats *s,
                         enum pmd_stat_type counter, int delta)
+{
+    uint64_t tmp;
+    atomic_read_relaxed(&s->counters.n[counter], &tmp);
+    tmp += delta;
+    atomic_store_relaxed(&s->counters.n[counter], tmp);
+}
+
+static inline void
+assist_perf_update_counter(struct assist_perf_stats *s,
+                           enum assist_stat_type counter, int delta)
 {
     uint64_t tmp;
     atomic_read_relaxed(&s->counters.n[counter], &tmp);
@@ -412,6 +480,10 @@ void
 pmd_perf_end_iteration(struct pmd_perf_stats *s, int rx_packets,
                        int tx_packets, uint64_t sleep_cycles,
                        bool full_metrics);
+void
+assist_perf_start_iteration(struct assist_perf_stats *s);
+void
+assist_perf_end_iteration(struct assist_perf_stats *s, int msgs);
 
 /* Formatting the output of commands. */
 
@@ -433,6 +505,17 @@ void pmd_perf_format_ms_history(struct ds *str, struct pmd_perf_stats *s,
 void pmd_perf_log_set_cmd(struct unixctl_conn *conn,
                           int argc, const char *argv[],
                           void *aux OVS_UNUSED);
+void assist_perf_format_iteration_history(struct ds *str,
+                                          struct assist_perf_stats *s,
+                                          int n_iter);
+void assist_perf_format_ms_history(struct ds *str,
+                                   struct assist_perf_stats *s,
+                                   int n_ms);
+void assist_perf_format_overall_stats(struct ds *str,
+                                      struct assist_perf_stats *s,
+                                      double duration);
+void assist_perf_format_histograms(struct ds *str,
+                                   struct assist_perf_stats *s);
 
 #ifdef  __cplusplus
 }

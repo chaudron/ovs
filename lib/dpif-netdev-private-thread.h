@@ -253,10 +253,15 @@ struct dp_netdev_assist_thread {
     /* Assist ring used for receiving messages. */
     ATOMIC(struct rte_ring *) msg_ring;
     struct rte_ring *_msg_ring;     /* Private copy of the msg_ring */
+
+    /* Keep track of detailed assist thread performance statistics. */
+    struct assist_perf_stats perf_stats;
+
 };
 
 enum dp_netdev_assis_msg_types {
     ASSIST_MSG_NOP = 0,
+    ASSIST_MSG_RCU_QUIESCE
 };
 
 struct dp_netdev_assist_msg {

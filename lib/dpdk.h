@@ -63,6 +63,12 @@ dpdk_ring_empty(const struct rte_ring *r)
     return rte_ring_empty(r);
 }
 
+static inline ALWAYS_INLINE unsigned int
+dpdk_ring_count(const struct rte_ring *r)
+{
+    return rte_ring_count(r);
+}
+
 #else
 
 #define NON_PMD_CORE_ID UINT32_MAX
@@ -115,6 +121,11 @@ dpdk_ring_empty(const struct rte_ring *r OVS_UNUSED)
     return false;
 }
 
+static inline ALWAYS_INLINE unsigned int
+dpdk_ring_count(const struct rte_ring *r OVS_UNUSED)
+{
+    return 0;
+}
 
 #endif /* DPDK_NETDEV */
 

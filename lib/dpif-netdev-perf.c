@@ -60,7 +60,7 @@ pmd_perf_estimate_tsc_frequency(void)
     }
 #endif
     struct ovs_numa_dump *affinity;
-    struct pmd_perf_stats s;
+    struct perf_stats_common s;
     uint64_t start, stop;
 
     /* DPDK is not available or returned unreliable value.
@@ -172,12 +172,21 @@ history_init(struct history *h)
     memset(h, 0, sizeof(*h));
 }
 
+static void
+perf_stats_init_common(struct perf_stats_common *c)
+{
+    /* This should be called on a zero'ed common structure! */
+    ovs_mutex_init(&c->stats_mutex);
+    ovs_mutex_init(&c->clear_mutex);
+    c->iteration_cnt = 0;
+    c->start_ms = time_msec();
+}
+
 void
 pmd_perf_stats_init(struct pmd_perf_stats *s)
 {
     memset(s, 0, sizeof(*s));
-    ovs_mutex_init(&s->stats_mutex);
-    ovs_mutex_init(&s->clear_mutex);
+    perf_stats_init_common(&s->common);
     /* Logarithmic histogram for cycles/it ranging from 500 to 24M
      * (corresponding to 200 ns to 9.6 ms at 2.5 GHz TSC clock). */
     histogram_walls_set_log(&s->cycles, 500, 24000000);
@@ -198,8 +207,6 @@ pmd_perf_stats_init(struct pmd_perf_stats *s)
      * descriptors (maximum configurable length in Qemu), with the
      * DPDK 17.11 virtio PMD in the guest. */
     histogram_walls_set_log(&s->max_vhost_qfill, 0, 512);
-    s->iteration_cnt = 0;
-    s->start_ms = time_msec();
     s->log_susp_it = UINT32_MAX;
     s->log_begin_it = UINT32_MAX;
     s->log_end_it = UINT32_MAX;
@@ -351,18 +358,19 @@ pmd_perf_format_histograms(struct ds *str, struct pmd_perf_stats *s)
                   s->totals.iterations
                       ? s->totals.cycles / s->totals.iterations : 0,
                   s->totals.iterations
-                      ? 1.0 * s->totals.pkts / s->totals.iterations : 0,
-                  s->totals.pkts
-                      ? s->totals.busy_cycles / s->totals.pkts : 0,
-                  s->totals.batches
-                      ? 1.0 * s->totals.pkts / s->totals.batches : 0,
+                      ? 1.0 * s->totals.pmd.pkts / s->totals.iterations : 0,
+                  s->totals.pmd.pkts
+                      ? s->totals.busy_cycles / s->totals.pmd.pkts : 0,
+                  s->totals.pmd.batches
+                  ? 1.0 * s->totals.pmd.pkts / s->totals.pmd.batches : 0,
                   s->totals.iterations
-                      ? 1.0 * s->totals.max_vhost_qfill / s->totals.iterations
-                      : 0,
+                      ? 1.0 * s->totals.pmd.max_vhost_qfill
+                      / s->totals.iterations : 0,
                   s->totals.iterations
-                      ? 1.0 * s->totals.upcalls / s->totals.iterations : 0,
-                  s->totals.upcalls
-                      ? s->totals.upcall_cycles / s->totals.upcalls : 0);
+                      ? 1.0 * s->totals.pmd.upcalls / s->totals.iterations : 0,
+                  s->totals.pmd.upcalls
+                      ? s->totals.pmd.upcall_cycles / s->totals.pmd.upcalls
+                      : 0);
 }
 
 void
@@ -389,12 +397,13 @@ pmd_perf_format_iteration_history(struct ds *str, struct pmd_perf_stats *s,
                       "  %-11"PRIu32"  %-11"PRIu32"\n",
                       is->timestamp,
                       is->cycles,
-                      is->pkts,
-                      is->pkts ? is->cycles / is->pkts : 0,
-                      is->batches ? is->pkts / is->batches : 0,
-                      is->max_vhost_qfill,
-                      is->upcalls,
-                      is->upcalls ? is->upcall_cycles / is->upcalls : 0);
+                      is->pmd.pkts,
+                      is->pmd.pkts ? is->cycles / is->pmd.pkts : 0,
+                      is->pmd.batches ? is->pmd.pkts / is->pmd.batches : 0,
+                      is->pmd.max_vhost_qfill,
+                      is->pmd.upcalls,
+                      is->pmd.upcalls ? is->pmd.upcall_cycles /
+                          is->pmd.upcalls : 0);
     }
 }
 
@@ -423,13 +432,14 @@ pmd_perf_format_ms_history(struct ds *str, struct pmd_perf_stats *s, int n_ms)
                       is->timestamp,
                       is->iterations,
                       is->iterations ? is->cycles / is->iterations : 0,
-                      is->pkts,
-                      is->pkts ? is->busy_cycles / is->pkts : 0,
-                      is->batches ? is->pkts / is->batches : 0,
+                      is->pmd.pkts,
+                      is->pmd.pkts ? is->busy_cycles / is->pmd.pkts : 0,
+                      is->pmd.batches ? is->pmd.pkts / is->pmd.batches : 0,
                       is->iterations
-                          ? is->max_vhost_qfill / is->iterations : 0,
-                      is->upcalls,
-                      is->upcalls ? is->upcall_cycles / is->upcalls : 0);
+                          ? is->pmd.max_vhost_qfill / is->iterations : 0,
+                      is->pmd.upcalls,
+                      is->pmd.upcalls ? is->pmd.upcall_cycles / is->pmd.upcalls
+                          : 0);
     }
 }
 
@@ -460,9 +470,11 @@ pmd_perf_read_counters(struct pmd_perf_stats *s,
  * poll loop. */
 void
 pmd_perf_stats_clear_lock(struct pmd_perf_stats *s)
-    OVS_REQUIRES(s->stats_mutex)
+    OVS_REQUIRES(s->common.stats_mutex)
 {
-    ovs_mutex_lock(&s->clear_mutex);
+    struct perf_stats_common *c = &s->common;
+
+    ovs_mutex_lock(&c->clear_mutex);
     for (int i = 0; i < PMD_N_STATS; i++) {
         atomic_read_relaxed(&s->counters.n[i], &s->counters.zero[i]);
     }
@@ -478,15 +490,15 @@ pmd_perf_stats_clear_lock(struct pmd_perf_stats *s)
     histogram_clear(&s->max_vhost_qfill);
     history_init(&s->iterations);
     history_init(&s->milliseconds);
-    s->start_ms = time_msec();
-    s->milliseconds.sample[0].timestamp = s->start_ms;
+    c->start_ms = time_msec();
+    s->milliseconds.sample[0].timestamp = c->start_ms;
     s->log_susp_it = UINT32_MAX;
     s->log_begin_it = UINT32_MAX;
     s->log_end_it = UINT32_MAX;
     s->log_reason = NULL;
     /* Clearing finished. */
-    s->clear = false;
-    ovs_mutex_unlock(&s->clear_mutex);
+    c->clear = false;
+    ovs_mutex_unlock(&c->clear_mutex);
 }
 
 /* This function can be called from the anywhere to clear the stats
@@ -494,14 +506,14 @@ pmd_perf_stats_clear_lock(struct pmd_perf_stats *s)
 void
 pmd_perf_stats_clear(struct pmd_perf_stats *s)
 {
-    if (ovs_mutex_trylock(&s->stats_mutex) == 0) {
+    if (ovs_mutex_trylock(&s->common.stats_mutex) == 0) {
         /* Locking successful. PMD not polling. */
         pmd_perf_stats_clear_lock(s);
-        ovs_mutex_unlock(&s->stats_mutex);
+        ovs_mutex_unlock(&s->common.stats_mutex);
     } else {
         /* Request the polling PMD to clear the stats. There is no need to
          * block here as stats retrieval is prevented during clearing. */
-        s->clear = true;
+        s->common.clear = true;
     }
 }
 
@@ -509,23 +521,25 @@ pmd_perf_stats_clear(struct pmd_perf_stats *s)
 
 void
 pmd_perf_start_iteration(struct pmd_perf_stats *s)
-OVS_REQUIRES(s->stats_mutex)
+OVS_REQUIRES(s->common.stats_mutex)
 {
-    if (s->clear) {
+    struct perf_stats_common *c = &s->common;
+
+    if (c->clear) {
         /* Clear the PMD stats before starting next iteration. */
         pmd_perf_stats_clear_lock(s);
     }
-    s->iteration_cnt++;
+    c->iteration_cnt++;
     /* Initialize the current interval stats. */
     memset(&s->current, 0, sizeof(struct iter_stats));
-    if (OVS_LIKELY(s->last_tsc)) {
+    if (OVS_LIKELY(c->last_tsc)) {
         /* We assume here that last_tsc was updated immediately prior at
          * the end of the previous iteration, or just before the first
          * iteration. */
-        s->start_tsc = s->last_tsc;
+        c->start_tsc = c->last_tsc;
     } else {
         /* In case last_tsc has never been set before. */
-        s->start_tsc = cycles_counter_update(s);
+        c->start_tsc = cycles_counter_update(c);
     }
 }
 
@@ -534,15 +548,16 @@ pmd_perf_end_iteration(struct pmd_perf_stats *s, int rx_packets,
                        int tx_packets, uint64_t sleep_cycles,
                        bool full_metrics)
 {
-    uint64_t now_tsc = cycles_counter_update(s);
+    struct perf_stats_common *c = &s->common;
+    uint64_t now_tsc = cycles_counter_update(c);
     struct iter_stats *cum_ms;
     uint64_t cycles, cycles_per_pkt = 0;
     char *reason = NULL;
 
-    cycles = now_tsc - s->start_tsc - sleep_cycles;
-    s->current.timestamp = s->iteration_cnt;
+    cycles = now_tsc - c->start_tsc - sleep_cycles;
+    s->current.timestamp = c->iteration_cnt;
     s->current.cycles = cycles;
-    s->current.pkts = rx_packets;
+    s->current.pmd.pkts = rx_packets;
 
     if (rx_packets + tx_packets > 0) {
         pmd_perf_update_counter(s, PMD_CYCLES_ITER_BUSY, cycles);
@@ -562,14 +577,14 @@ pmd_perf_end_iteration(struct pmd_perf_stats *s, int rx_packets,
         return;
     }
 
-    s->counters.n[PMD_CYCLES_UPCALL] += s->current.upcall_cycles;
+    s->counters.n[PMD_CYCLES_UPCALL] += s->current.pmd.upcall_cycles;
 
     if (rx_packets > 0) {
         cycles_per_pkt = cycles / rx_packets;
         histogram_add_sample(&s->cycles_per_pkt, cycles_per_pkt);
     }
-    histogram_add_sample(&s->upcalls, s->current.upcalls);
-    histogram_add_sample(&s->max_vhost_qfill, s->current.max_vhost_qfill);
+    histogram_add_sample(&s->upcalls, s->current.pmd.upcalls);
+    histogram_add_sample(&s->max_vhost_qfill, s->current.pmd.max_vhost_qfill);
 
     /* Add iteration samples to millisecond stats. */
     cum_ms = history_current(&s->milliseconds);
@@ -578,29 +593,29 @@ pmd_perf_end_iteration(struct pmd_perf_stats *s, int rx_packets,
     if (rx_packets > 0) {
         cum_ms->busy_cycles += cycles;
     }
-    cum_ms->pkts += s->current.pkts;
-    cum_ms->upcalls += s->current.upcalls;
-    cum_ms->upcall_cycles += s->current.upcall_cycles;
-    cum_ms->batches += s->current.batches;
-    cum_ms->max_vhost_qfill += s->current.max_vhost_qfill;
+    cum_ms->pmd.pkts += s->current.pmd.pkts;
+    cum_ms->pmd.upcalls += s->current.pmd.upcalls;
+    cum_ms->pmd.upcall_cycles += s->current.pmd.upcall_cycles;
+    cum_ms->pmd.batches += s->current.pmd.batches;
+    cum_ms->pmd.max_vhost_qfill += s->current.pmd.max_vhost_qfill;
 
     if (log_enabled) {
         /* Log suspicious iterations. */
         if (cycles > iter_cycle_threshold) {
             reason = "Excessive total cycles";
-        } else if (s->current.max_vhost_qfill >= log_q_thr) {
+        } else if (s->current.pmd.max_vhost_qfill >= log_q_thr) {
             reason = "Vhost RX queue full";
         }
         if (OVS_UNLIKELY(reason)) {
             pmd_perf_set_log_susp_iteration(s, reason);
-            cycles_counter_update(s);
+            cycles_counter_update(c);
         }
 
         /* Log iteration interval around suspicious iteration when reaching
          * the end of the range to be logged. */
         if (OVS_UNLIKELY(s->log_end_it == s->iterations.idx)) {
             pmd_perf_log_susp_iteration_neighborhood(s);
-            cycles_counter_update(s);
+            cycles_counter_update(c);
         }
     }
 
@@ -608,7 +623,7 @@ pmd_perf_end_iteration(struct pmd_perf_stats *s, int rx_packets,
      * clears the next slot in the iteration history. */
     history_store(&s->iterations, &s->current);
 
-    if (now_tsc > s->next_check_tsc) {
+    if (now_tsc > c->next_check_tsc) {
         /* Check if ms is completed and store in milliseconds history. */
         uint64_t now = time_msec();
         if (now != cum_ms->timestamp) {
@@ -616,16 +631,16 @@ pmd_perf_end_iteration(struct pmd_perf_stats *s, int rx_packets,
             s->totals.iterations += cum_ms->iterations;
             s->totals.cycles += cum_ms->cycles;
             s->totals.busy_cycles += cum_ms->busy_cycles;
-            s->totals.pkts += cum_ms->pkts;
-            s->totals.upcalls += cum_ms->upcalls;
-            s->totals.upcall_cycles += cum_ms->upcall_cycles;
-            s->totals.batches += cum_ms->batches;
-            s->totals.max_vhost_qfill += cum_ms->max_vhost_qfill;
+            s->totals.pmd.pkts += cum_ms->pmd.pkts;
+            s->totals.pmd.upcalls += cum_ms->pmd.upcalls;
+            s->totals.pmd.upcall_cycles += cum_ms->pmd.upcall_cycles;
+            s->totals.pmd.batches += cum_ms->pmd.batches;
+            s->totals.pmd.max_vhost_qfill += cum_ms->pmd.max_vhost_qfill;
             cum_ms = history_next(&s->milliseconds);
             cum_ms->timestamp = now;
         }
         /* Do the next check after 4 us (10K cycles at 2.5 GHz TSC clock). */
-        s->next_check_tsc = cycles_counter_update(s) + tsc_hz / 250000;
+        c->next_check_tsc = cycles_counter_update(c) + tsc_hz / 250000;
     }
 }
 
@@ -802,4 +817,344 @@ pmd_perf_log_set_cmd(struct unixctl_conn *conn,
     iter_cycle_threshold = (log_us_thr * tsc_hz) / 1000000L;
 
     unixctl_command_reply(conn, "");
+}
+
+void
+assist_perf_stats_init(struct assist_perf_stats *s, int dequeue_batch_size,
+                       int queue_size)
+{
+    memset(s, 0, sizeof(*s));
+    perf_stats_init_common(&s->common);
+    /* Logarithmic histogram for cycles/it ranging from 500 to 24M
+     * (corresponding to 200 ns to 9.6 ms at 2.5 GHz TSC clock). */
+    histogram_walls_set_log(&s->cycles, 500, 24000000);
+    histogram_walls_set_lin(&s->msgs, 0, dequeue_batch_size);
+    histogram_walls_set_lin(&s->cycles_per_msg, 100, 30000);
+    histogram_walls_set_log(&s->queue_depth, 0, queue_size);
+    histogram_walls_set_log(&s->continuous_empty_poll, 0, 1024);
+}
+
+void
+assist_perf_format_overall_stats(struct ds *str, struct assist_perf_stats *s,
+                                 double duration)
+{
+    uint64_t stats[ASSIST_N_STATS];
+    double us_per_cycle = 1000000.0 / tsc_hz;
+
+    if (duration == 0) {
+        return;
+    }
+
+    assist_perf_read_counters(s, stats);
+    uint64_t tot_cycles = stats[ASSIST_CYCLES_ITER_IDLE] +
+        stats[ASSIST_CYCLES_ITER_BUSY];
+    uint64_t tot_iter = histogram_samples(&s->msgs);
+    uint64_t idle_iter = s->msgs.bin[0];
+    uint64_t busy_iter = tot_iter >= idle_iter ? tot_iter - idle_iter : 0;
+
+    uint64_t msgs = stats[ASSIST_STAT_MSGS];
+    uint64_t msg_nop = stats[ASSIST_STAT_MSG_NOP];
+    uint64_t msg_quiesce = stats[ASSIST_STAT_MSG_RCU_QUIESCE];
+
+    uint64_t msg_nop_cycles = stats[ASSIST_CYCLES_MSG_NOP];
+    uint64_t msg_quiesce_cycles = stats[ASSIST_CYCLES_MSG_RCU_QUIESCE];
+    uint64_t msgs_cycles = msg_nop_cycles + msg_quiesce_cycles;
+
+    ds_put_format(
+        str,
+        "  Iterations:         %12"PRIu64"  (%.2f us/it)\n"
+        "  - Used TSC cycles:  %12"PRIu64"  (%5.1f %% of total cycles)\n"
+        "  - idle iterations:  %12"PRIu64"  (%5.1f %% of used cycles)\n"
+        "  - busy iterations:  %12"PRIu64"  (%5.1f %% of used cycles)\n",
+        tot_iter, tot_cycles * us_per_cycle / tot_iter,
+        tot_cycles, 100.0 * (tot_cycles / duration) / tsc_hz,
+        idle_iter,
+        100.0 * stats[ASSIST_CYCLES_ITER_IDLE] / tot_cycles,
+        busy_iter,
+        100.0 * stats[ASSIST_CYCLES_ITER_BUSY] / tot_cycles);
+
+    ds_put_format(
+        str,
+        "  Messages cycles:    %12"PRIu64"  (%5.1f %% of busy cycles)\n"
+        "  - No OPeration      %12"PRIu64"  (%5.1f %% of message cycles)\n"
+        "  - RCU quiesce       %12"PRIu64"  (%5.1f %% of message cycles)\n",
+        msgs_cycles,
+        stats[ASSIST_CYCLES_ITER_BUSY] ? 100.0 * msg_nop_cycles /
+            stats[ASSIST_CYCLES_ITER_BUSY] : 0,
+        msg_nop_cycles,
+        msgs_cycles ? 100.0 * msg_nop_cycles / msgs_cycles : 0,
+        msg_quiesce_cycles,
+        msgs_cycles ? 100.0 * msg_quiesce_cycles / msgs_cycles : 0);
+
+    ds_put_format(
+        str,
+        "  Messages:           %12"PRIu64"  (%.0f Kmsg/s, %.0f cycles/msg)\n"
+        "  - No OPeration      %12"PRIu64"  (%5.1f %% of messages)\n"
+        "  - RCU quiesce       %12"PRIu64"  (%5.1f %% of messages)\n",
+        msgs, (msgs / duration) / 1000,
+        msgs ? 1.0 * stats[ASSIST_CYCLES_ITER_BUSY] / msgs : 0,
+        msg_nop,  msgs ? 100.0 * msg_nop / msgs : 0,
+        msg_quiesce,  msgs ? 100.0 * msg_quiesce / msgs : 0);
+}
+
+void
+assist_perf_format_histograms(struct ds *str, struct assist_perf_stats *s)
+{
+    int i;
+
+    ds_put_cstr(str, "Histograms\n");
+    ds_put_format(str,
+                  "   %-21s  %-21s  %-21s  %-21s  %-21s\n",
+                  "cycles/it", "msgs/it", "cycles/msg", "queue depth/it",
+                  "empty polls");
+    for (i = 0; i < NUM_BINS - 1; i++) {
+        ds_put_format(str,
+            "   %-9d %-11"PRIu64"  %-9d %-11"PRIu64"  %-9d %-11"PRIu64
+            "  %-9d %-11"PRIu64"  %-9d %-11"PRIu64"\n",
+            s->cycles.wall[i], s->cycles.bin[i],
+            s->msgs.wall[i],s->msgs.bin[i],
+            s->cycles_per_msg.wall[i],s->cycles_per_msg.bin[i],
+            s->queue_depth.wall[i], s->queue_depth.bin[i],
+            s->continuous_empty_poll.wall[i], s->continuous_empty_poll.bin[i]);
+    }
+    ds_put_format(str,
+                  "   %-9s %-11"PRIu64"  %-9s %-11"PRIu64"  %-9s %-11"PRIu64
+                  "  %-9s %-11"PRIu64"  %-9s %-11"PRIu64"\n",
+                  ">", s->cycles.bin[i],
+                  ">", s->msgs.bin[i],
+                  ">", s->cycles_per_msg.bin[i],
+                  ">", s->queue_depth.bin[i],
+                  ">", s->continuous_empty_poll.bin[i]);
+
+    if (s->totals.iterations <= 0) {
+        return;
+    }
+
+    ds_put_cstr(str,
+                "-----------------------------------------------------"
+                "-----------------------------------------------------"
+                "--------\n");
+    ds_put_format(str,
+                  "   %-21s  %-21s  %-21s  %-21s\n",
+                  "cycles/it", "msgs/it",  "cycles/msg", "queue depth/it");
+
+    ds_put_format(str,
+                  "   %-21"PRIu64"  %-21.5f  %-21"PRIu64"  %-21.5f\n",
+                  s->totals.cycles / s->totals.iterations,
+                  1.0 * s->totals.assist.msgs / s->totals.iterations,
+                  s->totals.assist.msgs
+                      ? s->totals.busy_cycles / s->totals.assist.msgs : 0,
+                  1.0 * s->totals.assist.queue_depth / s->totals.iterations);
+}
+
+void
+assist_perf_format_iteration_history(struct ds *str,
+                                     struct assist_perf_stats *s, int n_iter)
+{
+    struct iter_stats *is;
+    size_t index;
+    int i;
+
+    if (n_iter == 0) {
+        return;
+    }
+    ds_put_format(str, "   %-17s   %-10s   %-10s   %-10s   %-10s\n",
+                  "iter", "cycles", "messages", "cycles/msg", "queue depth");
+
+    for (i = 1; i <= n_iter; i++) {
+        index = history_sub(s->iterations.idx, i);
+        is = &s->iterations.sample[index];
+
+        if (is->timestamp == 0) {
+            continue;
+        }
+
+        ds_put_format(str,
+                      "   %-17"PRIu64"   %-11"PRIu64"  %-11"PRIu32
+                      "  %-11"PRIu64"  %-11"PRIu32"\n",
+                      is->timestamp,
+                      is->cycles,
+                      is->assist.msgs,
+                      is->assist.msgs ? is->cycles / is->assist.msgs : 0,
+                      is->assist.queue_depth);
+    }
+}
+
+void
+assist_perf_format_ms_history(struct ds *str, struct assist_perf_stats *s,
+                              int n_ms)
+{
+    struct iter_stats *is;
+    size_t index;
+    int i;
+
+    if (n_ms == 0) {
+        return;
+    }
+    ds_put_format(str,
+                  "   %-12s   %-10s   %-10s   %-10s   %-10s   %-10s\n",
+                  "ms", "iterations", "cycles/it", "messages", "cycles/msg",
+                  "avg. queue depth");
+
+    for (i = 1; i <= n_ms; i++) {
+        index = history_sub(s->milliseconds.idx, i);
+        is = &s->milliseconds.sample[index];
+
+        if (is->timestamp == 0) {
+            continue;
+        }
+
+        ds_put_format(str,
+                      "   %-12"PRIu64"   %-11"PRIu32"  %-11"PRIu64
+                      "  %-11"PRIu32"  %-11"PRIu64"  %-11"PRIu32"\n",
+                      is->timestamp,
+                      is->iterations,
+                      is->iterations ? is->cycles / is->iterations : 0,
+                      is->assist.msgs,
+                      is->assist.msgs ? is->busy_cycles / is->assist.msgs : 0,
+                      is->iterations ? is->assist.queue_depth
+                          / is->iterations : 0);
+    }
+}
+
+void
+assist_perf_read_counters(struct assist_perf_stats *s,
+                          uint64_t stats[ASSIST_N_STATS])
+{
+    uint64_t val;
+
+    /* These loops subtracts reference values (.zero[*]) from the counters.
+     * Since loads and stores are relaxed, it might be possible for a .zero[*]
+     * value to be more recent than the current value we're reading from the
+     * counter.  This is not a big problem, since these numbers are not
+     * supposed to be 100% accurate, but we should at least make sure that
+     * the result is not negative. */
+    for (int i = 0; i < ASSIST_N_STATS; i++) {
+        atomic_read_relaxed(&s->counters.n[i], &val);
+        if (val > s->counters.zero[i]) {
+            stats[i] = val - s->counters.zero[i];
+        } else {
+            stats[i] = 0;
+        }
+    }
+}
+/* This function clears the assist threads performance counters from within
+ * the assist thread or from another thread when the assist thread is not
+ * executing its poll loop. */
+static void
+assist_perf_stats_clear_lock(struct assist_perf_stats *s)
+    OVS_REQUIRES(s->common.stats_mutex)
+{
+    struct perf_stats_common *c = &s->common;
+
+    ovs_mutex_lock(&c->clear_mutex);
+    for (int i = 0; i < ASSIST_N_STATS; i++) {
+        atomic_read_relaxed(&s->counters.n[i], &s->counters.zero[i]);
+    }
+    /* The following stats are only applicable in the assist thread. */
+    memset(&s->current, 0 , sizeof(struct iter_stats));
+    memset(&s->totals, 0 , sizeof(struct iter_stats));
+    histogram_clear(&s->cycles);
+    histogram_clear(&s->msgs);
+    histogram_clear(&s->cycles_per_msg);
+    histogram_clear(&s->queue_depth);
+    histogram_clear(&s->continuous_empty_poll);
+    history_init(&s->iterations);
+    history_init(&s->milliseconds);
+    c->start_ms = time_msec();
+    s->milliseconds.sample[0].timestamp = c->start_ms;
+    /* Clearing finished. */
+    c->clear = false;
+    ovs_mutex_unlock(&c->clear_mutex);
+}
+
+/* This function can be called from the anywhere to clear the stats of the
+ * assist threads. */
+void
+assist_perf_stats_clear(struct assist_perf_stats *s)
+{
+    if (ovs_mutex_trylock(&s->common.stats_mutex) == 0) {
+        /* Locking successful. PMD not polling. */
+        assist_perf_stats_clear_lock(s);
+        ovs_mutex_unlock(&s->common.stats_mutex);
+    } else {
+        /* Request the polling PMD to clear the stats. There is no need to
+         * block here as stats retrieval is prevented during clearing. */
+        s->common.clear = true;
+    }
+}
+
+void
+assist_perf_start_iteration(struct assist_perf_stats *s)
+OVS_REQUIRES(s->common.stats_mutex)
+{
+    struct perf_stats_common *c = &s->common;
+
+    if (c->clear) {
+        /* Clear the assist thread stats before starting next iteration. */
+        assist_perf_stats_clear_lock(s);
+    }
+    c->iteration_cnt++;
+    /* Initialize the current interval stats. */
+    memset(&s->current, 0, sizeof(struct iter_stats));
+    if (OVS_LIKELY(c->last_tsc)) {
+        /* We assume here that last_tsc was updated immediately prior at
+         * the end of the previous iteration, or just before the first
+         * iteration. */
+        c->start_tsc = c->last_tsc;
+    } else {
+        /* In case last_tsc has never been set before. */
+        c->start_tsc = cycles_counter_update(c);
+    }
+}
+
+void
+assist_perf_end_iteration(struct assist_perf_stats *s, int msgs)
+{
+    struct perf_stats_common *c = &s->common;
+    uint64_t now_tsc = cycles_counter_update(c);
+    struct iter_stats *cum_ms;
+    uint64_t cycles;
+
+    cycles = now_tsc - c->start_tsc;
+    s->current.timestamp = c->iteration_cnt;
+    s->current.cycles = cycles;
+    s->current.assist.msgs = msgs;
+
+    /* Add iteration samples to counters and histograms. */
+    if (msgs > 0) {
+        assist_perf_update_counter(s, ASSIST_CYCLES_ITER_BUSY, cycles);
+        assist_perf_update_counter(s, ASSIST_STAT_MSGS, msgs);
+        histogram_add_sample(&s->cycles_per_msg, cycles / msgs);
+    } else {
+        assist_perf_update_counter(s, ASSIST_CYCLES_ITER_IDLE, cycles);
+    }
+    histogram_add_sample(&s->cycles, cycles);
+    histogram_add_sample(&s->msgs, msgs);
+
+    /* Add iteration samples to millisecond stats. */
+    cum_ms = history_current(&s->milliseconds);
+    cum_ms->iterations++;
+    cum_ms->cycles += cycles;
+    cum_ms->assist.msgs += s->current.assist.msgs;
+
+    /* Store in iteration history. This advances the iteration idx and
+     * clears the next slot in the iteration history. */
+    history_store(&s->iterations, &s->current);
+
+    if (now_tsc > c->next_check_tsc) {
+        /* Check if ms is completed and store in milliseconds history. */
+        uint64_t now = time_msec();
+        if (now != cum_ms->timestamp) {
+            /* Add ms stats to totals. */
+            s->totals.iterations += cum_ms->iterations;
+            s->totals.cycles += cum_ms->cycles;
+            s->totals.busy_cycles += cum_ms->busy_cycles;
+            s->totals.assist.msgs += cum_ms->assist.msgs;
+            cum_ms = history_next(&s->milliseconds);
+            cum_ms->timestamp = now;
+        }
+        /* Do the next check after 4 us (10K cycles at 2.5 GHz TSC clock). */
+        c->next_check_tsc = cycles_counter_update(c) + tsc_hz / 250000;
+    }
 }
