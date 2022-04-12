@@ -65,7 +65,7 @@ static struct latch postpone_exit;
 static struct ovs_barrier postpone_barrier;
 
 static void ovsrcu_init_module(void);
-static void ovsrcu_flush_cbset__(struct ovsrcu_perthread *, bool);
+static void ovsrcu_flush_cbset__(struct ovsrcu_cbset *, bool);
 static void ovsrcu_flush_cbset(struct ovsrcu_perthread *);
 static void ovsrcu_unregister__(struct ovsrcu_perthread *);
 static bool ovsrcu_call_postponed(void);
@@ -153,12 +153,38 @@ ovsrcu_quiesce(void)
 
     perthread = ovsrcu_perthread_get();
     perthread->seqno = seq_read(global_seqno);
-    if (perthread->cbset) {
-        ovsrcu_flush_cbset(perthread);
-    }
+    ovsrcu_flush_cbset(perthread);
     seq_change(global_seqno);
 
     ovsrcu_quiesced();
+}
+
+struct ovsrcu_cbset *
+ovsrcu_quiesce_p1(void)
+{
+    struct ovsrcu_perthread *perthread;
+    struct ovsrcu_cbset *cbset;
+
+    perthread = ovsrcu_perthread_get();
+    perthread->seqno = seq_read(global_seqno);
+    cbset = perthread->cbset;
+    perthread->cbset = NULL;
+
+    /* Insert a full memory barrier normally introduced by seq_change(). */
+    atomic_thread_fence(memory_order_seq_cst);
+
+    ovsrcu_quiesced();
+
+    return cbset;
+}
+
+void
+ovsrcu_quiesce_p2(struct ovsrcu_cbset *cbset)
+{
+    if (cbset) {
+        ovsrcu_flush_cbset__(cbset, false);
+    }
+    seq_change(global_seqno);
 }
 
 int
@@ -172,7 +198,8 @@ ovsrcu_try_quiesce(void)
     if (!seq_try_lock()) {
         perthread->seqno = seq_read(global_seqno);
         if (perthread->cbset) {
-            ovsrcu_flush_cbset__(perthread, true);
+            ovsrcu_flush_cbset__(perthread->cbset, true);
+            perthread->cbset = NULL;
         }
         seq_change_protected(global_seqno);
         seq_unlock();
@@ -371,34 +398,30 @@ ovsrcu_postpone_thread(void *arg OVS_UNUSED)
 }
 
 static void
-ovsrcu_flush_cbset__(struct ovsrcu_perthread *perthread, bool protected)
+ovsrcu_flush_cbset__(struct ovsrcu_cbset *cbset, bool protected)
 {
-    struct ovsrcu_cbset *cbset = perthread->cbset;
+    guarded_list_push_back(&flushed_cbsets, &cbset->list_node, SIZE_MAX);
 
-    if (cbset) {
-        guarded_list_push_back(&flushed_cbsets, &cbset->list_node, SIZE_MAX);
-        perthread->cbset = NULL;
-
-        if (protected) {
-            seq_change_protected(flushed_cbsets_seq);
-        } else {
-            seq_change(flushed_cbsets_seq);
-        }
+    if (protected) {
+        seq_change_protected(flushed_cbsets_seq);
+    } else {
+        seq_change(flushed_cbsets_seq);
     }
 }
 
 static void
 ovsrcu_flush_cbset(struct ovsrcu_perthread *perthread)
 {
-    ovsrcu_flush_cbset__(perthread, false);
+    if (perthread->cbset) {
+        ovsrcu_flush_cbset__(perthread->cbset, false);
+        perthread->cbset = NULL;
+    }
 }
 
 static void
 ovsrcu_unregister__(struct ovsrcu_perthread *perthread)
 {
-    if (perthread->cbset) {
-        ovsrcu_flush_cbset(perthread);
-    }
+    ovsrcu_flush_cbset(perthread);
 
     ovs_mutex_lock(&ovsrcu_threads_mutex);
     ovs_list_remove(&perthread->list_node);

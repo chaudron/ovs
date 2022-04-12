@@ -650,6 +650,8 @@ static struct dp_netdev_assist_msg *
 pmd_assist_reserve_single_msg(struct dp_netdev_assist_thread *assist);
 static void
 pmd_assist_commit_single_msg(struct dp_netdev_assist_thread *assist);
+static bool
+pmd_assist_ring_available(struct dp_netdev_assist_thread *assist);
 static void
 dp_netdev_rxq_set_cycles(struct dp_netdev_rxq *rx,
                          enum rxq_cycles_counter_type type,
@@ -852,7 +854,8 @@ pmd_info_show_perf(struct ds *reply,
         ds_put_cstr(reply, "\n");
         format_thread(reply, pmd->core_id, pmd->numa_id, false);
         ds_put_cstr(reply, "\n");
-        pmd_perf_format_overall_stats(reply, &pmd->perf_stats, duration);
+        pmd_perf_format_overall_stats(reply, &pmd->perf_stats, duration,
+                                      pmd->assist_thread);
         if (pmd_perf_metrics_enabled(pmd)) {
             /* Prevent parallel clearing of perf metrics. */
             ovs_mutex_lock(&pmd->perf_stats.common.clear_mutex);
@@ -7266,19 +7269,6 @@ assist_thread_main(void *f_)
     atomic_store_relaxed(&assist->msg_ring, msg_ring);
     assist->_msg_ring = msg_ring;
 
-    /* TODO: Simple message API test. */
-    if (true) {
-        struct dp_netdev_assist_msg *msg;
-
-        for (int i = 0; i < ASSIST_MSG_QUEUE_SIZE + 10; i++) {
-            msg = pmd_assist_reserve_single_msg(assist);
-            if (msg) {
-                msg->msg_type = ASSIST_MSG_NOP + (i & 1);
-                pmd_assist_commit_single_msg(assist);
-            }
-        }
-    }
-
     ovs_mutex_lock(&assist->perf_stats.common.stats_mutex);
     for (;;) {
         int n_msgs;
@@ -7338,6 +7328,49 @@ error_exit:
         dpdk_detach_thread(true);
     }
     return NULL;
+}
+
+static inline int pmd_try_rcu_quiesce(struct dp_netdev_pmd_thread *pmd,
+                                      bool force)
+{
+    int ret = EBUSY;
+
+    if (force || pmd->ctx.now > pmd->next_rcu_quiesce) {
+
+        if (pmd->assist_thread) {
+            struct dp_netdev_assist_msg *msg;
+
+            msg = pmd_assist_reserve_single_msg(pmd->assist_thread);
+            if (OVS_LIKELY(msg)) {
+
+                struct ovsrcu_cbset *cbset = ovsrcu_quiesce_p1();
+
+                msg->msg_type = ASSIST_MSG_RCU_QUIESCE;
+                msg->data.user_pointer = cbset;
+                pmd_assist_commit_single_msg(pmd->assist_thread);
+
+                pmd_perf_update_counter(&pmd->perf_stats,
+                                        PMD_STAT_MSG_RCU_QUIESCE, 1);
+                ret = 0;
+            } else {
+                /* On msg alloc failure we retry the next loop iteration. */
+                pmd_perf_update_counter(&pmd->perf_stats,
+                                        PMD_STAT_FAIL_MSG_RCU_QUIESCE, 1);
+
+                if (!pmd_assist_ring_available(pmd->assist_thread)) {
+                    ret = ovsrcu_try_quiesce();
+                }
+            }
+        } else {
+            ret = ovsrcu_try_quiesce();
+        }
+    }
+
+    if (!ret) {
+        pmd->next_rcu_quiesce =
+            pmd->ctx.now + PMD_RCU_QUIESCE_INTERVAL;
+    }
+    return ret;
 }
 
 static void *
@@ -7485,22 +7518,15 @@ reload:
         /* Do RCU synchronization at fixed interval.  This ensures that
          * synchronization would not be delayed long even at high load of
          * packet processing. */
-        if (pmd->ctx.now > pmd->next_rcu_quiesce) {
-            if (!ovsrcu_try_quiesce()) {
-                pmd->next_rcu_quiesce =
-                    pmd->ctx.now + PMD_RCU_QUIESCE_INTERVAL;
-            }
-        }
+        pmd_try_rcu_quiesce(pmd, false);
 
         if (lc++ > 1024) {
             lc = 0;
 
             coverage_try_clear();
             dp_netdev_pmd_try_optimize(pmd, poll_list, poll_cnt);
-            if (!ovsrcu_try_quiesce()) {
+            if (!pmd_try_rcu_quiesce(pmd, true)) {
                 emc_cache_slow_sweep(&((pmd->flow_cache).emc_cache));
-                pmd->next_rcu_quiesce =
-                    pmd->ctx.now + PMD_RCU_QUIESCE_INTERVAL;
             }
 
             for (i = 0; i < poll_cnt; i++) {
@@ -10877,6 +10903,8 @@ pmd_assist_process_single_msg(struct dp_netdev_assist_thread *assist
                                    ASSIST_STAT_MSG_NOP, 1);
         break;
     case ASSIST_MSG_RCU_QUIESCE:
+        ovsrcu_quiesce_p2(msg->data.user_pointer);
+
         assist_perf_update_counter(&assist->perf_stats,
                                    ASSIST_STAT_MSG_RCU_QUIESCE, 1);
         break;
@@ -10904,4 +10932,12 @@ pmd_assist_process_msg_queue(struct dp_netdev_assist_thread *assist,
 {
     return _pmd_assist_process_msg_queue(assist, n_msgs,
                                          pmd_assist_process_single_msg);
+}
+
+static bool
+pmd_assist_ring_available(struct dp_netdev_assist_thread *assist)
+{
+    struct rte_ring *ring;
+    atomic_read_relaxed(&assist->msg_ring, &ring);
+    return ring;
 }

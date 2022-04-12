@@ -317,6 +317,15 @@ void ovsrcu_quiesce(void);
 int ovsrcu_try_quiesce(void);
 bool ovsrcu_is_quiescent(void);
 
+/* Version of ovsrcu_quiesce() broken up into two phases.
+ * ovsrcu_queisce_p1() MUST be called on the quiesce thread, same as where
+ * you would normally call ovsrcu_quiesce(). The second call,
+ * ovsrcu_queisce_p2() can be called from any thread. */
+struct ovsrcu_cbset;
+
+struct ovsrcu_cbset *ovsrcu_quiesce_p1(void);
+void ovsrcu_quiesce_p2(struct ovsrcu_cbset *cbset);
+
 /* Synchronization.  Waits for all non-quiescent threads to quiesce at least
  * once.  This can block for a relatively long time. */
 void ovsrcu_synchronize(void);

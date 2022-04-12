@@ -82,6 +82,8 @@ enum pmd_stat_type {
     PMD_CYCLES_UPCALL,      /* Cycles spent processing upcalls. */
     PMD_SLEEP_ITER,         /* Iterations where a sleep has taken place. */
     PMD_CYCLES_SLEEP,       /* Total cycles slept to save power. */
+    PMD_STAT_MSG_RCU_QUIESCE,      /* PMD_MSG_RCU_QUIESCE counter. */
+    PMD_STAT_FAIL_MSG_RCU_QUIESCE, /* PMD_FAIL_MSG_RCU_QUIESCE counter. */
     PMD_N_STATS
 };
 
@@ -495,7 +497,7 @@ struct pmd_perf_params {
 };
 
 void pmd_perf_format_overall_stats(struct ds *str, struct pmd_perf_stats *s,
-                                   double duration);
+                                   double duration, bool show_msg_cnt);
 void pmd_perf_format_histograms(struct ds *str, struct pmd_perf_stats *s);
 void pmd_perf_format_iteration_history(struct ds *str,
                                        struct pmd_perf_stats *s,

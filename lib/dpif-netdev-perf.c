@@ -215,7 +215,7 @@ pmd_perf_stats_init(struct pmd_perf_stats *s)
 
 void
 pmd_perf_format_overall_stats(struct ds *str, struct pmd_perf_stats *s,
-                              double duration)
+                              double duration, bool show_msg_cnt)
 {
     uint64_t stats[PMD_N_STATS];
     double us_per_cycle = 1000000.0 / tsc_hz;
@@ -306,7 +306,36 @@ pmd_perf_format_overall_stats(struct ds *str, struct pmd_perf_stats *s,
             tx_batches, 1.0 * tx_packets / tx_batches);
     } else {
         ds_put_format(str,
-            "  Tx packets:         %12d\n\n", 0);
+            "  Tx packets:         %12d\n", 0);
+    }
+    if (show_msg_cnt) {
+        uint64_t msg_quiesce = stats[PMD_STAT_MSG_RCU_QUIESCE];
+        uint64_t msgs = msg_quiesce;
+
+        uint64_t fail_msg_quiesce = stats[PMD_STAT_FAIL_MSG_RCU_QUIESCE];
+        uint64_t fail_msgs = fail_msg_quiesce;
+
+        if (msgs > 0) {
+            ds_put_format(
+                str,
+                "  Messages:           %12"PRIu64"  (%.0f Kmsg/s)\n"
+                "  - RCU quiesce       %12"PRIu64"  (%.0f Kmsg/s, "
+                "%5.1f %% of messages)\n",
+                msgs, (msgs / duration) / 1000,
+                msg_quiesce, (msg_quiesce / duration) / 1000,
+                msgs ? 100.0 * msg_quiesce / msgs : 0);
+        }
+        if (fail_msgs > 0) {
+            ds_put_format(
+                str,
+                "  Message ring full:  %12"PRIu64"  (%.0f failures/s)\n"
+                "  - RCU quiesce       %12"PRIu64"  (%.0f Kmsg/s, "
+                "%5.1f %% of messages)\n",
+                fail_msgs, (fail_msgs / duration) / 1000,
+                fail_msg_quiesce,
+                (fail_msg_quiesce / duration) / 1000,
+                fail_msgs ? 100.0 * fail_msg_quiesce / fail_msgs : 0);
+        }
     }
 }
 
