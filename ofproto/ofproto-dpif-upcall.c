@@ -42,6 +42,7 @@
 #include "seq.h"
 #include "tunnel.h"
 #include "unixctl.h"
+#include "openvswitch/usdt-probes.h"
 #include "openvswitch/vlog.h"
 #include "lib/netdev-provider.h"
 
@@ -965,6 +966,7 @@ udpif_revalidator(void *arg)
                 terse_dump = udpif_use_ufid(udpif);
                 udpif->dump = dpif_flow_dump_create(udpif->dpif, terse_dump,
                                                     NULL);
+                OVS_USDT_PROBE(udpif_revalidator, start_dump, udpif, n_flows);
             }
         }
 
@@ -1015,6 +1017,9 @@ udpif_revalidator(void *arg)
                 VLOG_INFO("Spent an unreasonably long %lldms dumping flows",
                           duration);
             }
+
+            OVS_USDT_PROBE(udpif_revalidator, sweep_done, udpif, n_flows,
+                           MIN(ofproto_max_idle, ofproto_max_revalidator));
 
             poll_timer_wait_until(start_time + MIN(ofproto_max_idle,
                                                    ofproto_max_revalidator));
@@ -2215,6 +2220,9 @@ revalidate_ukey__(struct udpif *udpif, const struct udpif_key *ukey,
         .wc = &wc,
     };
 
+    OVS_USDT_PROBE(revalidate_ukey__, entry, udpif, ukey, tcp_flags,
+                   odp_actions, recircs, xcache);
+
     result = UKEY_DELETE;
     xoutp = NULL;
     netflow = NULL;
@@ -2278,6 +2286,9 @@ exit:
         netflow_flow_clear(netflow, &ctx.flow);
     }
     xlate_out_uninit(xoutp);
+
+    OVS_USDT_PROBE(revalidate_ukey__, exit, udpif, ukey, result);
+
     return result;
 }
 
