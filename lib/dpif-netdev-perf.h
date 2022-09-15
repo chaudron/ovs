@@ -82,19 +82,23 @@ enum pmd_stat_type {
     PMD_CYCLES_UPCALL,      /* Cycles spent processing upcalls. */
     PMD_SLEEP_ITER,         /* Iterations where a sleep has taken place. */
     PMD_CYCLES_SLEEP,       /* Total cycles slept to save power. */
-    PMD_STAT_MSG_RCU_QUIESCE,      /* PMD_MSG_RCU_QUIESCE counter. */
-    PMD_STAT_FAIL_MSG_RCU_QUIESCE, /* PMD_FAIL_MSG_RCU_QUIESCE counter. */
+    PMD_STAT_MSG_RCU_QUIESCE,       /* PMD_MSG_RCU_QUIESCE counter. */
+    PMD_STAT_MSG_VHOST_NOTIFY,      /* PMD_MSG_VHOST_NOTIFY counter. */
+    PMD_STAT_FAIL_MSG_RCU_QUIESCE,  /* PMD_FAIL_MSG_RCU_QUIESCE counter. */
+    PMD_STAT_FAIL_MSG_VHOST_NOTIFY, /* PMD_FAIL_VHOST_NOTIFY counter. */
     PMD_N_STATS
 };
 
 enum assist_stat_type {
-    ASSIST_CYCLES_ITER_IDLE,       /* Cycles spent in idle iterations. */
-    ASSIST_CYCLES_ITER_BUSY,       /* Cycles spent in busy iterations. */
-    ASSIST_STAT_MSGS,              /* Total received messages. */
-    ASSIST_STAT_MSG_NOP,           /* ASSIST_MSG_NOP counter. */
-    ASSIST_STAT_MSG_RCU_QUIESCE,   /* ASSIST_MSG_RCU_QUIESCE counter. */
-    ASSIST_CYCLES_MSG_NOP,         /* ASSIST_MSG_NOP cycles. */
-    ASSIST_CYCLES_MSG_RCU_QUIESCE, /* ASSIST_MSG_RCU_QUIESCE cycles. */
+    ASSIST_CYCLES_ITER_IDLE,        /* Cycles spent in idle iterations. */
+    ASSIST_CYCLES_ITER_BUSY,        /* Cycles spent in busy iterations. */
+    ASSIST_STAT_MSGS,               /* Total received messages. */
+    ASSIST_STAT_MSG_NOP,            /* ASSIST_MSG_NOP counter. */
+    ASSIST_STAT_MSG_RCU_QUIESCE,    /* ASSIST_MSG_RCU_QUIESCE counter. */
+    ASSIST_STAT_MSG_VHOST_NOTIFY,   /* ASSIST_MSG_VHOST_NOTIFY counter. */
+    ASSIST_CYCLES_MSG_NOP,          /* ASSIST_MSG_NOP cycles. */
+    ASSIST_CYCLES_MSG_RCU_QUIESCE,  /* ASSIST_MSG_RCU_QUIESCE cycles. */
+    ASSIST_CYCLES_MSG_VHOST_NOTIFY, /* ASSIST_MSG_VHOST_NOTIFY cycles. */
     ASSIST_N_STATS
 };
 

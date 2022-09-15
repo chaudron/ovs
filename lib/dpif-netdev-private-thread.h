@@ -261,7 +261,14 @@ struct dp_netdev_assist_thread {
 
 enum dp_netdev_assis_msg_types {
     ASSIST_MSG_NOP = 0,
-    ASSIST_MSG_RCU_QUIESCE
+    ASSIST_MSG_RCU_QUIESCE,
+    ASSIST_MSG_VHOST_NOTIFY,
+};
+
+
+struct dp_assist_data_vhost_notify {
+    int vid;
+    uint16_t queue_id;
 };
 
 struct dp_netdev_assist_msg {
@@ -269,6 +276,7 @@ struct dp_netdev_assist_msg {
     uint16_t reserved;
     union {
         void *user_pointer;
+        struct dp_assist_data_vhost_notify vhost_notify;
     } data;
 };
 BUILD_ASSERT_DECL(IS_POW2(sizeof(struct dp_netdev_assist_msg)));

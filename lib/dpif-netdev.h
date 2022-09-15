@@ -34,6 +34,7 @@ extern "C" {
 enum { DP_NETDEV_HEADROOM = 2 + VLAN_HEADER_LEN };
 
 bool dpif_is_netdev(const struct dpif *);
+bool pmd_assist_msg_send_vhost_notify(int vid, uint16_t queue_id);
 
 #define NR_QUEUE   1
 #define NR_PMD_THREADS 1

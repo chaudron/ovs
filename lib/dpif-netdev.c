@@ -90,6 +90,8 @@
 
 VLOG_DEFINE_THIS_MODULE(dpif_netdev);
 
+static ovsthread_key_t GLOBAL_DP_KEY; /* XXX: Fix this, make it nice :) */
+
 /* Auto Load Balancing Defaults */
 #define ALB_IMPROVEMENT_THRESHOLD    25
 #define ALB_LOAD_THRESHOLD           95
@@ -7394,6 +7396,7 @@ pmd_thread_main(void *f_)
 
     /* Stores the pmd thread's 'pmd' to 'per_pmd_key'. */
     ovsthread_setspecific(pmd->dp->per_pmd_key, pmd);
+    GLOBAL_DP_KEY = pmd->dp->per_pmd_key; /* XXX: Fix this, make it nice :) */
     ovs_numa_thread_setaffinity_core(pmd->core_id);
     dpdk_attached = dpdk_attach_thread(pmd->core_id, false);
     poll_cnt = pmd_load_queues_and_ports(pmd, &poll_list);
@@ -10874,6 +10877,7 @@ static void pmd_assist_flush_single_msg(
     case ASSIST_MSG_NOP:
         break;
     case ASSIST_MSG_RCU_QUIESCE:
+    case ASSIST_MSG_VHOST_NOTIFY:
         break;
     }
 }
@@ -10908,6 +10912,13 @@ pmd_assist_process_single_msg(struct dp_netdev_assist_thread *assist
         assist_perf_update_counter(&assist->perf_stats,
                                    ASSIST_STAT_MSG_RCU_QUIESCE, 1);
         break;
+    case ASSIST_MSG_VHOST_NOTIFY:
+        netdev_dpdk_vhost_notify_guest(msg->data.vhost_notify.vid,
+                                       msg->data.vhost_notify.queue_id);
+
+        assist_perf_update_counter(&assist->perf_stats,
+                                   ASSIST_STAT_MSG_VHOST_NOTIFY, 1);
+        break;
     }
 
     cycles =  cycle_timer_stop(&assist->perf_stats.common, &timer);
@@ -10920,6 +10931,11 @@ pmd_assist_process_single_msg(struct dp_netdev_assist_thread *assist
     case ASSIST_MSG_RCU_QUIESCE:
         assist_perf_update_counter(&assist->perf_stats,
                                    ASSIST_CYCLES_MSG_RCU_QUIESCE,
+                                   cycles);
+        break;
+    case ASSIST_MSG_VHOST_NOTIFY:
+        assist_perf_update_counter(&assist->perf_stats,
+                                   ASSIST_CYCLES_MSG_VHOST_NOTIFY,
                                    cycles);
         break;
     }
@@ -10940,4 +10956,37 @@ pmd_assist_ring_available(struct dp_netdev_assist_thread *assist)
     struct rte_ring *ring;
     atomic_read_relaxed(&assist->msg_ring, &ring);
     return ring;
+}
+
+bool
+pmd_assist_msg_send_vhost_notify(int vid, uint16_t queue_id)
+{
+    struct dp_netdev_pmd_thread *pmd;
+
+    if (GLOBAL_DP_KEY == NULL) {
+        return false;
+    }
+
+    pmd = ovsthread_getspecific(GLOBAL_DP_KEY);
+    if (pmd && pmd->assist_thread) {
+        struct dp_netdev_assist_msg *msg;
+
+        msg = pmd_assist_reserve_single_msg(pmd->assist_thread);
+        if (OVS_LIKELY(msg)) {
+
+            msg->msg_type = ASSIST_MSG_VHOST_NOTIFY;
+            msg->data.vhost_notify.vid = vid;
+            msg->data.vhost_notify.queue_id = queue_id;
+            pmd_assist_commit_single_msg(pmd->assist_thread);
+
+            pmd_perf_update_counter(&pmd->perf_stats,
+                                    PMD_STAT_MSG_VHOST_NOTIFY, 1);
+
+            return true;
+        } else {
+            pmd_perf_update_counter(&pmd->perf_stats,
+                                    PMD_STAT_FAIL_MSG_VHOST_NOTIFY, 1);
+        }
+    }
+    return false;
 }

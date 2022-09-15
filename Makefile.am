@@ -69,6 +69,7 @@ DISTCLEANFILES =
 PYCOV_CLEAN_FILES = build-aux/check-structs,cover
 
 EXTRA_DIST = \
+        dpdk_vhost_notify_change.diff \
 	AUTHORS.rst \
 	CONTRIBUTING.rst \
 	LICENSE \

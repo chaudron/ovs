@@ -1,0 +1,138 @@
+commit 33d67e0a98a7c7b66b582b31b0d9836d1d6ec59e
+Author: Eelco Chaudron <echaudro@redhat.com>
+Date:   Fri Jul 1 16:22:01 2022 +0200
+
+    vhost: add operation to delay guest notification
+
+diff --git a/lib/vhost/rte_vhost.h b/lib/vhost/rte_vhost.h
+index a395843fe9..8568657eda 100644
+--- a/lib/vhost/rte_vhost.h
++++ b/lib/vhost/rte_vhost.h
+@@ -298,7 +298,13 @@ struct rte_vhost_device_ops {
+ 	 */
+ 	void (*guest_notified)(int vid);
+ 
+-	void *reserved[1]; /**< Reserved for future extension */
++	/**
++	 * If this callback is registered, notification to the guest can
++	 * be handled by the front-end calling rte_vhost_notify_guest().
++	 * If it's not handled, 'false' should be returned. This can be used
++	 * to remove the "slow" eventfd_write() syscall from the datapath.
++	 */
++	bool (*guest_notify)(int vid, uint16_t queue_id);
+ };
+ 
+ /**
+@@ -433,6 +439,8 @@ void rte_vhost_log_used_vring(int vid, uint16_t vring_idx,
+ 
+ int rte_vhost_enable_guest_notification(int vid, uint16_t queue_id, int enable);
+ 
++void rte_vhost_notify_guest(int vid, uint16_t queue_id);
++
+ /**
+  * Register vhost driver. path could be different for multiple
+  * instance support.
+diff --git a/lib/vhost/vhost.c b/lib/vhost/vhost.c
+index 19c7b92c32..a5df4f3835 100644
+--- a/lib/vhost/vhost.c
++++ b/lib/vhost/vhost.c
+@@ -1468,6 +1468,27 @@ rte_vhost_enable_guest_notification(int vid, uint16_t queue_id, int enable)
+ 	return ret;
+ }
+ 
++void
++rte_vhost_notify_guest(int vid, uint16_t queue_id)
++{
++	struct virtio_net *dev = get_device(vid);
++	struct vhost_virtqueue *vq;
++
++	if (!dev ||  queue_id >= VHOST_MAX_VRING)
++		return;
++
++	vq = dev->virtqueue[queue_id];
++	if (!vq)
++		return;
++
++	rte_spinlock_lock(&vq->access_lock);
++
++	if (vq->callfd >= 0)
++		eventfd_write(vq->callfd, (eventfd_t)1);
++
++	rte_spinlock_unlock(&vq->access_lock);
++}
++
+ void
+ rte_vhost_log_write(int vid, uint64_t addr, uint64_t len)
+ {
+diff --git a/lib/vhost/vhost.h b/lib/vhost/vhost.h
+index ef211ed519..584f814482 100644
+--- a/lib/vhost/vhost.h
++++ b/lib/vhost/vhost.h
+@@ -859,6 +859,29 @@ vhost_need_event(uint16_t event_idx, uint16_t new_idx, uint16_t old)
+ 	return (uint16_t)(new_idx - event_idx - 1) < (uint16_t)(new_idx - old);
+ }
+ 
++static __rte_always_inline void
++vhost_vring_kick_guest(struct virtio_net *dev, struct vhost_virtqueue *vq)
++{
++	if (dev->notify_ops->guest_notify) {
++		for (uint16_t qid = 0;  qid < dev->nr_vring; qid++) {
++			if (dev->virtqueue[qid] == vq) {
++				if (dev->notify_ops->guest_notify(dev->vid,
++								  qid))
++					goto done;
++				break;
++			}
++		}
++	}
++	eventfd_write(vq->callfd, (eventfd_t) 1);
++
++done:
++	if (dev->flags & VIRTIO_DEV_STATS_ENABLED)
++		vq->stats.guest_notifications++;
++	if (dev->notify_ops->guest_notified)
++		dev->notify_ops->guest_notified(dev->vid);
++}
++
++
+ static __rte_always_inline void
+ vhost_vring_call_split(struct virtio_net *dev, struct vhost_virtqueue *vq)
+ {
+@@ -881,21 +904,13 @@ vhost_vring_call_split(struct virtio_net *dev, struct vhost_virtqueue *vq)
+ 		if ((vhost_need_event(vhost_used_event(vq), new, old) &&
+ 					(vq->callfd >= 0)) ||
+ 				unlikely(!signalled_used_valid)) {
+-			eventfd_write(vq->callfd, (eventfd_t) 1);
+-			if (dev->flags & VIRTIO_DEV_STATS_ENABLED)
+-				vq->stats.guest_notifications++;
+-			if (dev->notify_ops->guest_notified)
+-				dev->notify_ops->guest_notified(dev->vid);
++			vhost_vring_kick_guest(dev, vq);
+ 		}
+ 	} else {
+ 		/* Kick the guest if necessary. */
+ 		if (!(vq->avail->flags & VRING_AVAIL_F_NO_INTERRUPT)
+ 				&& (vq->callfd >= 0)) {
+-			eventfd_write(vq->callfd, (eventfd_t)1);
+-			if (dev->flags & VIRTIO_DEV_STATS_ENABLED)
+-				vq->stats.guest_notifications++;
+-			if (dev->notify_ops->guest_notified)
+-				dev->notify_ops->guest_notified(dev->vid);
++			vhost_vring_kick_guest(dev, vq);
+ 		}
+ 	}
+ }
+@@ -947,11 +962,8 @@ vhost_vring_call_packed(struct virtio_net *dev, struct vhost_virtqueue *vq)
+ 	if (vhost_need_event(off, new, old))
+ 		kick = true;
+ kick:
+-	if (kick) {
+-		eventfd_write(vq->callfd, (eventfd_t)1);
+-		if (dev->notify_ops->guest_notified)
+-			dev->notify_ops->guest_notified(dev->vid);
+-	}
++	if (kick)
++		vhost_vring_kick_guest(dev, vq);
+ }
+ 
+ static __rte_always_inline void

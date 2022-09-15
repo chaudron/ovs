@@ -32,6 +32,8 @@ struct netdev;
 void netdev_dpdk_register(const struct smap *);
 void free_dpdk_buf(struct dp_packet *);
 
+void netdev_dpdk_vhost_notify_guest(int vid, uint16_t queue_id);
+
 bool netdev_dpdk_flow_api_supported(struct netdev *);
 
 int
@@ -152,6 +154,13 @@ netdev_dpdk_rte_flow_tunnel_item_release(
 
 static inline void
 free_dpdk_buf(struct dp_packet *buf OVS_UNUSED)
+{
+    /* Nothing */
+}
+
+static inline void
+netdev_dpdk_vhost_notify_guest(int vid OVS_UNUSED,
+                               uint16_t queue_id OVS_UNUSED)
 {
     /* Nothing */
 }

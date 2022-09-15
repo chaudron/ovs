@@ -188,6 +188,7 @@ static int new_device(int vid);
 static void destroy_device(int vid);
 static int vring_state_changed(int vid, uint16_t queue_id, int enable);
 static void destroy_connection(int vid);
+static bool vhost_guest_notify(int vid, uint16_t queue_id);
 
 static const struct rte_vhost_device_ops virtio_net_device_ops =
 {
@@ -197,6 +198,7 @@ static const struct rte_vhost_device_ops virtio_net_device_ops =
     .features_changed = NULL,
     .new_connection = NULL,
     .destroy_connection = destroy_connection,
+    .guest_notify = vhost_guest_notify,
 };
 
 /* Custom software stats for dpdk ports */
@@ -4405,6 +4407,18 @@ destroy_connection(int vid)
     } else {
         VLOG_INFO("vHost Device '%s' not found", ifname);
     }
+}
+
+static
+bool vhost_guest_notify(int vid, uint16_t queue_id)
+{
+    return pmd_assist_msg_send_vhost_notify(vid, queue_id);
+}
+
+void
+netdev_dpdk_vhost_notify_guest(int vid, uint16_t queue_id)
+{
+    rte_vhost_notify_guest(vid, queue_id);
 }
 
 /*
