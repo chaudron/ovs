@@ -311,11 +311,13 @@ pmd_perf_format_overall_stats(struct ds *str, struct pmd_perf_stats *s,
     if (show_msg_cnt) {
         uint64_t msg_quiesce = stats[PMD_STAT_MSG_RCU_QUIESCE];
         uint64_t msg_vhost = stats[PMD_STAT_MSG_VHOST_NOTIFY];
-        uint64_t msgs = msg_quiesce + msg_vhost;
+        uint64_t msg_send = stats[PMD_STAT_MSG_LINUX_SEND];
+        uint64_t msgs = msg_quiesce + msg_vhost + msg_send;
 
         uint64_t fail_msg_quiesce = stats[PMD_STAT_FAIL_MSG_RCU_QUIESCE];
         uint64_t fail_msg_vhost = stats[PMD_STAT_FAIL_MSG_VHOST_NOTIFY];
-        uint64_t fail_msgs = fail_msg_quiesce + fail_msg_vhost;
+        uint64_t fail_msg_send = stats[PMD_STAT_FAIL_MSG_LINUX_SEND];
+        uint64_t fail_msgs = fail_msg_quiesce + fail_msg_vhost + fail_msg_send;
 
         if (msgs > 0) {
             ds_put_format(
@@ -324,12 +326,16 @@ pmd_perf_format_overall_stats(struct ds *str, struct pmd_perf_stats *s,
                 "  - RCU quiesce       %12"PRIu64"  (%.0f Kmsg/s, "
                 "%5.1f %% of messages)\n"
                 "  - Vhost notify      %12"PRIu64"  (%.0f Kmsg/s, "
+                "%5.1f %% of messages)\n"
+                "  - Linux send        %12"PRIu64"  (%.0f Kmsg/s, "
                 "%5.1f %% of messages)\n",
                 msgs, (msgs / duration) / 1000,
                 msg_quiesce, (msg_quiesce / duration) / 1000,
                 msgs ? 100.0 * msg_quiesce / msgs : 0,
                 msg_vhost, (msg_vhost / duration) / 1000,
-                msgs ? 100.0 * msg_vhost / msgs : 0);
+                msgs ? 100.0 * msg_vhost / msgs : 0,
+                msg_send, (msg_send / duration) / 1000,
+                msgs ? 100.0 * msg_send / msgs : 0);
         }
         if (fail_msgs > 0) {
             ds_put_format(
@@ -338,6 +344,8 @@ pmd_perf_format_overall_stats(struct ds *str, struct pmd_perf_stats *s,
                 "  - RCU quiesce       %12"PRIu64"  (%.0f Kmsg/s, "
                 "%5.1f %% of messages)\n"
                 "  - Vhost notify      %12"PRIu64"  (%.0f Kmsg/s, "
+                "%5.1f %% of messages)\n"
+                "  - Linux send        %12"PRIu64"  (%.0f Kmsg/s, "
                 "%5.1f %% of messages)\n",
                 fail_msgs, (fail_msgs / duration) / 1000,
                 fail_msg_quiesce,
@@ -345,7 +353,10 @@ pmd_perf_format_overall_stats(struct ds *str, struct pmd_perf_stats *s,
                 fail_msgs ? 100.0 * fail_msg_quiesce / fail_msgs : 0,
                 fail_msg_vhost,
                 (fail_msg_vhost / duration) / 1000,
-                fail_msgs ? 100.0 * fail_msg_vhost / fail_msgs : 0);
+                fail_msgs ? 100.0 * fail_msg_vhost / fail_msgs : 0,
+                fail_msg_send,
+                (fail_msg_send / duration) / 1000,
+                fail_msgs ? 100.0 * fail_msg_send / fail_msgs : 0);
         }
     }
 }
@@ -896,12 +907,14 @@ assist_perf_format_overall_stats(struct ds *str, struct assist_perf_stats *s,
     uint64_t msg_nop = stats[ASSIST_STAT_MSG_NOP];
     uint64_t msg_quiesce = stats[ASSIST_STAT_MSG_RCU_QUIESCE];
     uint64_t msg_vhost = stats[ASSIST_STAT_MSG_VHOST_NOTIFY];
+    uint64_t msg_send = stats[ASSIST_STAT_MSG_LINUX_SEND];
 
     uint64_t msg_nop_cycles = stats[ASSIST_CYCLES_MSG_NOP];
     uint64_t msg_quiesce_cycles = stats[ASSIST_CYCLES_MSG_RCU_QUIESCE];
     uint64_t msg_vhost_cycles = stats[ASSIST_CYCLES_MSG_VHOST_NOTIFY];
+    uint64_t msg_send_cycles = stats[ASSIST_CYCLES_MSG_LINUX_SEND];
     uint64_t msgs_cycles = msg_nop_cycles + msg_quiesce_cycles +
-        msg_vhost_cycles;
+        msg_vhost_cycles + msg_send_cycles;
 
     ds_put_format(
         str,
@@ -921,7 +934,8 @@ assist_perf_format_overall_stats(struct ds *str, struct assist_perf_stats *s,
         "  Messages cycles:    %12"PRIu64"  (%5.1f %% of busy cycles)\n"
         "  - No OPeration      %12"PRIu64"  (%5.1f %% of message cycles)\n"
         "  - RCU quiesce       %12"PRIu64"  (%5.1f %% of message cycles)\n"
-        "  - Vhost notify      %12"PRIu64"  (%5.1f %% of message cycles)\n",
+        "  - Vhost notify      %12"PRIu64"  (%5.1f %% of message cycles)\n"
+        "  - Linux send        %12"PRIu64"  (%5.1f %% of message cycles)\n",
         msgs_cycles,
         stats[ASSIST_CYCLES_ITER_BUSY] ? 100.0 * msg_nop_cycles /
             stats[ASSIST_CYCLES_ITER_BUSY] : 0,
@@ -930,19 +944,23 @@ assist_perf_format_overall_stats(struct ds *str, struct assist_perf_stats *s,
         msg_quiesce_cycles,
         msgs_cycles ? 100.0 * msg_quiesce_cycles / msgs_cycles : 0,
         msg_vhost_cycles,
-        msgs_cycles ? 100.0 * msg_vhost_cycles / msgs_cycles : 0);
+        msgs_cycles ? 100.0 * msg_vhost_cycles / msgs_cycles : 0,
+        msg_send_cycles,
+        msgs_cycles ? 100.0 * msg_send_cycles / msgs_cycles : 0);
 
     ds_put_format(
         str,
         "  Messages:           %12"PRIu64"  (%.0f Kmsg/s, %.0f cycles/msg)\n"
         "  - No OPeration      %12"PRIu64"  (%5.1f %% of messages)\n"
         "  - RCU quiesce       %12"PRIu64"  (%5.1f %% of messages)\n"
-        "  - Vhost notify      %12"PRIu64"  (%5.1f %% of messages)\n",
+        "  - Vhost notify      %12"PRIu64"  (%5.1f %% of messages)\n"
+        "  - Linux send        %12"PRIu64"  (%5.1f %% of messages)\n",
         msgs, (msgs / duration) / 1000,
         msgs ? 1.0 * stats[ASSIST_CYCLES_ITER_BUSY] / msgs : 0,
         msg_nop,  msgs ? 100.0 * msg_nop / msgs : 0,
         msg_quiesce,  msgs ? 100.0 * msg_quiesce / msgs : 0,
-        msg_vhost,  msgs ? 100.0 * msg_vhost / msgs : 0);
+        msg_vhost,  msgs ? 100.0 * msg_vhost / msgs : 0,
+        msg_send,  msgs ? 100.0 * msg_send / msgs : 0);
 }
 
 void

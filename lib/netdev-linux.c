@@ -6914,3 +6914,12 @@ netdev_linux_prepend_vnet_hdr(struct dp_packet *b, int mtu)
         }
     }
 }
+
+bool
+is_linux_send_netdev(struct netdev *netdev)
+{
+    if (netdev_get_class(netdev)->send == netdev_linux_send) {
+        return true;
+    }
+    return false;
+}

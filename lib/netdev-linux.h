@@ -34,5 +34,6 @@ int tc_add_policer_action(uint32_t index, uint32_t kbits_rate,
                           uint32_t pkts_burst, bool update);
 int tc_del_policer_action(uint32_t index, struct ofputil_meter_stats *stats);
 int tc_get_policer_action(uint32_t index, struct ofputil_meter_stats *stats);
+bool is_linux_send_netdev(struct netdev *netdev);
 
 #endif /* netdev-linux.h */

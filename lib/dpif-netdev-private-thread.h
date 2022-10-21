@@ -263,6 +263,7 @@ enum dp_netdev_assis_msg_types {
     ASSIST_MSG_NOP = 0,
     ASSIST_MSG_RCU_QUIESCE,
     ASSIST_MSG_VHOST_NOTIFY,
+    ASSIST_MSG_LINUX_SEND,
 };
 
 
@@ -271,14 +272,28 @@ struct dp_assist_data_vhost_notify {
     uint16_t queue_id;
 };
 
+struct dp_assist_data_linux_send {
+    struct netdev *netdev;
+    /* TODO: This is a lot of overhead on the message size.. */
+    struct dp_packet_batch batch;
+    int qid;
+    bool concurrent_txq;
+
+    char power_of_two_allign[216]; /* TODO: This is no longer needed, see
+                                    * below. */
+};
+
 struct dp_netdev_assist_msg {
     uint16_t msg_type;
     uint16_t reserved;
     union {
         void *user_pointer;
         struct dp_assist_data_vhost_notify vhost_notify;
+        struct dp_assist_data_linux_send linux_send;
     } data;
 };
+/* TODO: Was misreading API, only the count needs power of two, fix this
+ *       in the previous patch. Guess we can use the PADDED_MEMBERS macro. */
 BUILD_ASSERT_DECL(IS_POW2(sizeof(struct dp_netdev_assist_msg)));
 
 #ifdef  __cplusplus

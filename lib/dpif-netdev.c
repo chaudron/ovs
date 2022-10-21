@@ -58,6 +58,7 @@
 #include "mov-avg.h"
 #include "mpsc-queue.h"
 #include "netdev.h"
+#include "netdev-linux.h"
 #include "netdev-offload.h"
 #include "netdev-provider.h"
 #include "netdev-vport.h"
@@ -102,6 +103,8 @@ static ovsthread_key_t GLOBAL_DP_KEY; /* XXX: Fix this, make it nice :) */
 #define FLOW_DUMP_MAX_BATCH          50
 #define ASSIST_MSG_QUEUE_MAX_BATCH   32
 #define ASSIST_MSG_QUEUE_SIZE        1024
+BUILD_ASSERT_DECL(IS_POW2(ASSIST_MSG_QUEUE_SIZE));
+
 /* Use per thread recirc_depth to prevent recirculation loop. */
 #define MAX_RECIRC_DEPTH 6
 DEFINE_STATIC_PER_THREAD_DATA(uint32_t, recirc_depth, 0)
@@ -654,6 +657,11 @@ static void
 pmd_assist_commit_single_msg(struct dp_netdev_assist_thread *assist);
 static bool
 pmd_assist_ring_available(struct dp_netdev_assist_thread *assist);
+static int
+pmd_assist_msg_send_linux_send(struct dp_netdev_pmd_thread *pmd,
+                               struct netdev *netdev, int qid,
+                               struct dp_packet_batch *batch,
+                               bool concurrent_txq);
 static void
 dp_netdev_rxq_set_cycles(struct dp_netdev_rxq *rx,
                          enum rxq_cycles_counter_type type,
@@ -5423,6 +5431,38 @@ pmd_perf_metrics_enabled(const struct dp_netdev_pmd_thread *pmd OVS_UNUSED)
 #endif
 
 static int
+dp_netdev_send(struct dp_netdev_pmd_thread *pmd, struct netdev *netdev,
+               int qid, struct dp_packet_batch *batch, bool concurrent_txq)
+{
+    if (OVS_UNLIKELY(is_linux_send_netdev(netdev) && pmd->assist_thread)) {
+        /* This is a Linux send() netdev, offload to the assist thread. */
+
+        /* TODO:
+         *   Figure out how to copy/mark packets as used...
+         *   How to handle statistics !? Do we assume all will be ok??!?
+         */
+
+        /* TODO: Guess this will only work with mbuf support and reference
+         *       counting, so for now assume this exists... */
+        if (OVS_UNLIKELY(batch->packets[0]->source != DPBUF_DPDK)) {
+            /* TODO: For now not assist them, but we should handle this...
+             *
+             * cnt = dpdk_copy_batch_to_mbuf(netdev, batch);
+             * stats->tx_failure_drops += pkt_cnt - cnt;
+             * pkt_cnt = cnt;
+             */
+        } else {
+            int rc = pmd_assist_msg_send_linux_send(pmd, netdev, qid, batch,
+                                                    concurrent_txq);
+            if (rc >= 0)
+                return rc;
+        }
+    }
+
+    return netdev_send(netdev, qid, batch, concurrent_txq);
+}
+
+static int
 dp_netdev_pmd_flush_output_on_port(struct dp_netdev_pmd_thread *pmd,
                                    struct tx_port *p)
 {
@@ -5463,7 +5503,7 @@ dp_netdev_pmd_flush_output_on_port(struct dp_netdev_pmd_thread *pmd,
             if (dp_packet_batch_is_empty(&p->txq_pkts[i])) {
                 continue;
             }
-            netdev_send(p->port->netdev, i, &p->txq_pkts[i], true);
+            dp_netdev_send(pmd, p->port->netdev, i, &p->txq_pkts[i], true);
             dp_packet_batch_init(&p->txq_pkts[i]);
         }
     } else {
@@ -5474,7 +5514,8 @@ dp_netdev_pmd_flush_output_on_port(struct dp_netdev_pmd_thread *pmd,
             tx_qid = pmd->static_tx_qid;
             concurrent_txqs = false;
         }
-        netdev_send(p->port->netdev, tx_qid, &p->output_pkts, concurrent_txqs);
+        dp_netdev_send(pmd, p->port->netdev, tx_qid, &p->output_pkts,
+                       concurrent_txqs);
     }
     dp_packet_batch_init(&p->output_pkts);
 
@@ -10879,6 +10920,9 @@ static void pmd_assist_flush_single_msg(
     case ASSIST_MSG_RCU_QUIESCE:
     case ASSIST_MSG_VHOST_NOTIFY:
         break;
+    case ASSIST_MSG_LINUX_SEND:
+        dp_packet_delete_batch(&msg->data.linux_send.batch, true);
+        break;
     }
 }
 
@@ -10919,6 +10963,17 @@ pmd_assist_process_single_msg(struct dp_netdev_assist_thread *assist
         assist_perf_update_counter(&assist->perf_stats,
                                    ASSIST_STAT_MSG_VHOST_NOTIFY, 1);
         break;
+    case ASSIST_MSG_LINUX_SEND:
+
+        /* TODO: Fix how netdev is used. */
+        netdev_send(msg->data.linux_send.netdev, msg->data.linux_send.qid,
+                    &msg->data.linux_send.batch,
+                    msg->data.linux_send.concurrent_txq);
+
+        assist_perf_update_counter(&assist->perf_stats,
+                                   ASSIST_STAT_MSG_LINUX_SEND, 1);
+        break;
+
     }
 
     cycles =  cycle_timer_stop(&assist->perf_stats.common, &timer);
@@ -10936,6 +10991,11 @@ pmd_assist_process_single_msg(struct dp_netdev_assist_thread *assist
     case ASSIST_MSG_VHOST_NOTIFY:
         assist_perf_update_counter(&assist->perf_stats,
                                    ASSIST_CYCLES_MSG_VHOST_NOTIFY,
+                                   cycles);
+        break;
+    case ASSIST_MSG_LINUX_SEND:
+        assist_perf_update_counter(&assist->perf_stats,
+                                   ASSIST_CYCLES_MSG_LINUX_SEND,
                                    cycles);
         break;
     }
@@ -10989,4 +11049,37 @@ pmd_assist_msg_send_vhost_notify(int vid, uint16_t queue_id)
         }
     }
     return false;
+}
+
+static int
+pmd_assist_msg_send_linux_send(struct dp_netdev_pmd_thread *pmd,
+                               struct netdev *netdev, int qid,
+                               struct dp_packet_batch *batch,
+                               bool concurrent_txq)
+{
+    struct dp_netdev_assist_msg *msg;
+
+    msg = pmd_assist_reserve_single_msg(pmd->assist_thread);
+    if (OVS_LIKELY(msg)) {
+
+        msg->msg_type = ASSIST_MSG_LINUX_SEND;
+        /* TODO: WE NEED A SAFE WAY TO PASS ON NETDEV */
+        msg->data.linux_send.netdev = netdev;
+        msg->data.linux_send.batch = *batch;
+        msg->data.linux_send.qid = qid;
+        msg->data.linux_send.concurrent_txq = concurrent_txq;
+        /* TODO: Do we need to pass qid and concurrent_txq, as they are not
+         *       used by netdev_linux_send(). Guess we should if we offload
+         *       other netdev devices to the assist thread. */
+        pmd_assist_commit_single_msg(pmd->assist_thread);
+
+        pmd_perf_update_counter(&pmd->perf_stats,
+                                PMD_STAT_MSG_LINUX_SEND, 1);
+
+        return dp_packet_batch_size(batch);
+    }
+    pmd_perf_update_counter(&pmd->perf_stats,
+                            PMD_STAT_FAIL_MSG_LINUX_SEND, 1);
+
+    return -ENOMEM;
 }
