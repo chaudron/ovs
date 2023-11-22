@@ -223,6 +223,86 @@ jobs:
         name: logs-linux-${{ join(matrix.*, '-') }}
         path: logs.tgz
 
+  build-clang-analyze:
+    needs: build-dpdk
+    env:
+      dependencies: |
+        automake bc clang-tools libbpf-dev libnuma-dev libpcap-dev \
+        libunbound-dev libunwind-dev libssl-dev libtool llvm-dev \
+        python3-unbound
+      CC:   clang
+      DPDK: dpdk
+      CLANG_ANALYZE: true
+    name: clang-analyze
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+    - name: checkout
+      uses: actions/checkout@v3
+
+    - name: checkout default branch
+      uses: actions/checkout@v3
+      with:
+        ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        fetch-depth: 0
+        path: upstream_ovs_main
+
+    - name: update PATH
+      run: |
+        echo "$HOME/bin"        >> $GITHUB_PATH
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: generate cache key
+      id: cache_key
+      run: |
+        echo "key=clang-analyze-$(git -C upstream_ovs_main rev-parse HEAD)" \
+          >> $GITHUB_OUTPUT
+
+    - name: check for analyzer result cache
+      id: clang_cache
+      uses: actions/cache@v3
+      with:
+        path: upstream-clang-analyzer-results
+        key:  ${{ steps.cache_key.outputs.key }}
+
+    - name: set up python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: get cached dpdk-dir
+      uses: actions/cache/restore@v3
+      with:
+        path: dpdk-dir
+        key:  ${{ needs.build-dpdk.outputs.dpdk_key }}
+
+    - name: update APT cache
+      run:  sudo apt update || true
+
+    - name: install common dependencies
+      run:  sudo apt install -y ${{ env.dependencies }}
+
+    - name: install sarif tools
+      run: sudo pip3 install --disable-pip-version-check sarif-tools
+
+    - name: prepare
+      run:  ./.ci/linux-prepare.sh
+
+    - name: build upstream reference
+      if: steps.clang_cache.outputs.cache-hit != 'true'
+      run:  ./.ci/linux-build.sh
+
+    - name: build
+      run:  ./.ci/linux-build.sh
+
+    - name: save cache
+      uses: actions/cache/save@v3
+      if: always() && steps.clang_cache.outputs.cache-hit != 'true'
+      with:
+        path: upstream-clang-analyzer-results
+        key:  ${{ steps.cache_key.outputs.key }}
+
   build-osx:
     env:
       CC:    clang
