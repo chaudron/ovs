@@ -83,6 +83,8 @@ main(int argc, char *argv[])
     char *remote;
     int retval;
 
+    remote = malloc(16901);
+
     set_program_name(argv[0]);
     ovsthread_id_init();
 
