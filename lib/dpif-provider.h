@@ -369,6 +369,10 @@ struct dpif_class {
     /* Queries 'dpif' to see if a certain number of handlers are required by
      * the implementation.
      *
+     * The 'n_handlers' value can be initialize with a system/user suggestion.
+     * It's up to the implementation if this suggestion fits the requirements
+     * for correct operation.
+     *
      * If a certain number of handlers are required, returns 'true' and sets
      * 'n_handlers' to that number of handler threads.
      *

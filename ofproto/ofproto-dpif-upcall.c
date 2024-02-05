@@ -660,7 +660,7 @@ udpif_set_threads(struct udpif *udpif, uint32_t n_handlers_,
                   uint32_t n_revalidators_)
 {
     ovs_assert(udpif);
-    uint32_t n_handlers_requested;
+    uint32_t n_handlers_requested = n_handlers_;
     uint32_t n_revalidators_requested;
     bool forced = false;
 

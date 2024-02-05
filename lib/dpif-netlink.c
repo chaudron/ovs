@@ -2839,7 +2839,13 @@ dpif_netlink_number_handlers_required(struct dpif *dpif_, uint32_t *n_handlers)
     struct dpif_netlink *dpif = dpif_netlink_cast(dpif_);
 
     if (dpif_netlink_upcall_per_cpu(dpif)) {
-        *n_handlers = dpif_netlink_calculate_n_handlers();
+        uint32_t calc_handlers = dpif_netlink_calculate_n_handlers();
+
+        /* When a specific number of handlers is requested, we honor this as
+         * long as they are less than the suggested number. */
+        if (!*n_handlers || *n_handlers > calc_handlers) {
+            *n_handlers = calc_handlers;
+        }
         return true;
     }
 
