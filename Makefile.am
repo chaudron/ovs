@@ -86,6 +86,7 @@ EXTRA_DIST = \
 	.cirrus.yml \
 	.editorconfig \
 	.github/workflows/build-and-test.yml \
+	.github/workflows/coverity.yml \
 	.readthedocs.yaml \
 	appveyor.yml \
 	boot.sh \

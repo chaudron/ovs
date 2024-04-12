@@ -1,0 +1,131 @@
+name: Coverity scan
+on:
+  schedule:
+    - cron: '0 0 * * *'
+
+env:
+  python_default: 3.12
+
+jobs:
+  build-dpdk:
+    env:
+      dependencies: gcc libbpf-dev libnuma-dev libpcap-dev ninja-build pkgconf
+      CC: gcc
+      DPDK_GIT: https://dpdk.org/git/dpdk
+      DPDK_VER: 23.11
+    name: dpdk gcc
+    outputs:
+      dpdk_key: ${{ steps.gen_dpdk_key.outputs.key }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+
+    - name: update PATH
+      run: |
+        echo "$HOME/bin"        >> $GITHUB_PATH
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: create ci signature file for the dpdk cache key
+      # This will collect most of DPDK related lines, so hash will be different
+      # if something changed in a way we're building DPDK including DPDK_VER.
+      # This also allows us to use cache from any branch as long as version
+      # and a way we're building DPDK stays the same.
+      run: |
+        cat .ci/dpdk-* > dpdk-ci-signature
+        grep -rwE 'DPDK_GIT|DPDK_VER' .github/ >> dpdk-ci-signature
+        if [ "${DPDK_VER##refs/*/}" != "${DPDK_VER}" ]; then
+            git ls-remote --heads $DPDK_GIT $DPDK_VER >> dpdk-ci-signature
+        fi
+        cat dpdk-ci-signature
+
+    - name: generate ci DPDK key
+      id: gen_dpdk_key
+      env:
+        ci_key: ${{ hashFiles('dpdk-ci-signature') }}
+      run: echo 'key=dpdk-${{ env.ci_key }}' >> $GITHUB_OUTPUT
+
+    - name: cache
+      id: dpdk_cache
+      uses: actions/cache@v4
+      with:
+        path: dpdk-dir
+        key: ${{ steps.gen_dpdk_key.outputs.key }}
+
+    - name: set up python
+      if: steps.dpdk_cache.outputs.cache-hit != 'true'
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.python_default }}
+
+    - name: update APT cache
+      if: steps.dpdk_cache.outputs.cache-hit != 'true'
+      run: sudo apt update || true
+    - name: install common dependencies
+      if: steps.dpdk_cache.outputs.cache-hit != 'true'
+      run: sudo apt install -y ${{ env.dependencies }}
+
+    - name: prepare
+      if: steps.dpdk_cache.outputs.cache-hit != 'true'
+      run: ./.ci/dpdk-prepare.sh
+
+    - name: build
+      if: steps.dpdk_cache.outputs.cache-hit != 'true'
+      run: ./.ci/dpdk-build.sh
+
+  build-coverity:
+    needs: build-dpdk
+    env:
+      dependencies: |
+        automake bc clang-tools libbpf-dev libnuma-dev libpcap-dev \
+        libunbound-dev libunwind-dev libssl-dev libtool llvm-dev \
+        selinux-policy-dev
+      CC: gcc
+      DPDK: dpdk
+    name: coverity
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+
+    - name: update PATH
+      run: |
+        echo "$HOME/bin"        >> $GITHUB_PATH
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: set up python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.python_default }}
+
+    - name: get cached dpdk-dir
+      uses: actions/cache/restore@v4
+      with:
+        path: dpdk-dir
+        key: ${{ needs.build-dpdk.outputs.dpdk_key }}
+
+    - name: update APT cache
+      run: sudo apt update || true
+
+    - name: install common dependencies
+      run: sudo apt install -y ${{ env.dependencies }}
+
+    - name: prepare
+      run: ./.ci/linux-prepare.sh
+
+    - name: build
+      run: ./.ci/linux-build.sh
+
+    - name: pre-coverity cleanup
+      run: make clean
+
+    - name: coverity scan
+      uses: vapier/coverity-scan-action@v1
+      with:
+        token: ${{ secrets.COVERITY_SCAN_TOKEN }}
+        email: ${{ secrets.COVERITY_SCAN_EMAIL }}
+        command: make -j4

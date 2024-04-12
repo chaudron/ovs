@@ -14,6 +14,8 @@ Open vSwitch
     :target: https://cirrus-ci.com/github/openvswitch/ovs
 .. image:: https://readthedocs.org/projects/openvswitch/badge/?version=latest
     :target: https://docs.openvswitch.org/en/latest/
+.. image:: https://scan.coverity.com/projects/29002/badge.svg
+    :target: https://scan.coverity.com/projects/chaudron-ovs
 
 What is Open vSwitch?
 ---------------------
