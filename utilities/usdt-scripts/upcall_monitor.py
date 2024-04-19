@@ -111,6 +111,7 @@
 #
 
 from bcc import BPF, USDT, USDTException
+from enum import IntEnum
 from os.path import exists
 from scapy.all import hexdump, wrpcap
 from scapy.layers.l2 import Ether
@@ -131,39 +132,112 @@ ebpf_source = """
 #define MAX_PACKET <MAX_PACKET_VAL>
 #define MAX_KEY    <MAX_KEY_VAL>
 
+#define OVS_PACKED_ENUM __attribute__((__packed__))
+
+enum OVS_PACKED_ENUM dp_packet_source {
+    DPBUF_MALLOC,              /* Obtained via malloc(). */
+    DPBUF_STACK,               /* Un-movable stack space or static buffer. */
+    DPBUF_STUB,                /* Starts on stack, may expand into heap. */
+    DPBUF_DPDK,                /* buffer data is from DPDK allocated memory.
+                                * ref to dp_packet_init_dpdk() in dp-packet.c.
+                                */
+    DPBUF_AFXDP,               /* Buffer data from XDP frame. */
+};
+
+
+struct dp_packet {
+//  struct rte_mbuf mbuf;       /* DPDK mbuf */
+// (gdb) print sizeof(struct rte_mbuf)
+// $2 = 128
+    char mbuf[128];       /* DPDK mbuf */
+    enum dp_packet_source source;  /* Source of memory allocated as 'base'. */
+
+    /* All the following elements of this struct are copied in a single call
+     * of memcpy in dp_packet_clone_with_headroom. */
+    uint16_t l2_pad_size;          /* Detected l2 padding size.
+                                    * Padding is non-pullable. */
+    uint16_t l2_5_ofs;             /* MPLS label stack offset, or UINT16_MAX */
+    uint16_t l3_ofs;               /* Network-level header offset,
+                                    * or UINT16_MAX. */
+    uint16_t l4_ofs;               /* Transport-level header offset,
+                                      or UINT16_MAX. */
+    uint32_t cutlen;               /* length in bytes to cut from the end. */
+//    ovs_be32 packet_type;          /* Packet type as defined in OpenFlow */
+    u32 packet_type;          /* Packet type as defined in OpenFlow */
+    uint16_t csum_start;           /* Position to start checksumming from. */
+    uint16_t csum_offset;          /* Offset to place checksum. */
+//    union {
+//        struct pkt_metadata md;
+//        uint64_t data[DP_PACKET_CONTEXT_SIZE / 8];
+//    };
+};
+
+struct dpif_execute {
+    /* Input. */
+//  const struct nlattr *actions;   /* Actions to execute on packet. */
+    const void *actions;   /* Actions to execute on packet. */
+    size_t actions_len;             /* Length of 'actions' in bytes. */
+    bool needs_help;
+    bool probe;                     /* Suppress error messages. */
+    unsigned int mtu;               /* Maximum transmission unit to fragment.
+                                       0 if not a fragmented packet */
+    uint64_t hash;                  /* Packet flow hash. 0 if not specified. */
+
+//  const struct flow *flow;        /* Flow extracted from 'packet'. */
+    const void *flow;               /* Flow extracted from 'packet'. */
+
+    /* Input, but possibly modified as a side effect of execution. */
+    struct dp_packet *packet;       /* Packet to execute. */
+};
+
+
+enum {
+<EVENT_ENUM>
+};
+
 struct event_t {
     u32 cpu;
     u32 pid;
     u32 upcall_type;
-    u64 ts;
     u32 pkt_size;
     u64 key_size;
+    u64 ts;
+    u8 type;
+    u32 packet_type;
     char comm[TASK_COMM_LEN];
     char dpif_name[32];
     unsigned char pkt[MAX_PACKET];
     unsigned char key[MAX_KEY];
 };
+
 BPF_RINGBUF_OUTPUT(events, <BUFFER_PAGE_CNT>);
 BPF_TABLE("percpu_array", uint32_t, uint64_t, dropcnt, 1);
 
-int do_trace(struct pt_regs *ctx) {
-    uint64_t addr;
-    uint64_t size;
-
+static struct event_t *get_event(uint32_t type) {
     struct event_t *event = events.ringbuf_reserve(sizeof(struct event_t));
-    if (!event) {
-        uint32_t type = 0;
-        uint64_t *value = dropcnt.lookup(&type);
-        if (value)
-            __sync_fetch_and_add(value, 1);
 
-        return 1;
+    if (!event) {
+        dropcnt.increment(0);
+        return NULL;
     }
 
+    event->type = type;
     event->ts = bpf_ktime_get_ns();
     event->cpu =  bpf_get_smp_processor_id();
     event->pid = bpf_get_current_pid_tgid();
     bpf_get_current_comm(&event->comm, sizeof(event->comm));
+
+    return event;
+}
+
+
+int do_upcall_trace(struct pt_regs *ctx) {
+    uint64_t addr;
+    uint64_t size;
+
+    struct event_t *event = get_event(EVENT_UPCALL);
+    if (!event)
+        return 1;
 
     bpf_usdt_readarg(1, ctx, &addr);
     bpf_probe_read_str(&event->dpif_name, sizeof(event->dpif_name),
@@ -190,7 +264,43 @@ int do_trace(struct pt_regs *ctx) {
     events.ringbuf_submit(event, 0);
     return 0;
 };
+
+int do_exec_trace(struct pt_regs *ctx) {
+
+    uint64_t addr;
+    uint64_t size;
+    struct dpif_execute exec;
+    struct dp_packet packet;
+
+    struct event_t *event = get_event(EVENT_OP_EXEC);
+    if (!event)
+        return 1;
+
+    bpf_usdt_readarg(4, ctx, &event->pkt_size);
+
+    if (event->pkt_size > MAX_PACKET)
+        size = MAX_PACKET;
+    else
+        size = event->pkt_size;
+    bpf_usdt_readarg(3, ctx, &addr);
+    bpf_probe_read(&event->pkt, size, (void *)addr);
+
+    bpf_usdt_readarg_p(2, ctx, &exec,  sizeof exec);
+    bpf_probe_read(&packet, sizeof packet, exec.packet);
+
+    event->packet_type = packet.packet_type;
+
+    events.ringbuf_submit(event, 0);
+    return 0;
+}
 """
+
+
+#
+# Event enum
+#
+Event = IntEnum("Event", ["UPCALL",
+                          "OP_EXEC"], start=0)
 
 
 #
@@ -198,8 +308,72 @@ int do_trace(struct pt_regs *ctx) {
 #
 def print_event(ctx, data, size):
     event = b['events'].event(data)
-    print("{:<18.9f} {:<4} {:<16} {:<10} {:<32} {:<4} {:<10} {:<10}".
-          format(event.ts / 1000000000,
+    if event.type == Event.UPCALL:
+        print_upcall(event)
+    elif event.type == Event.OP_EXEC:
+        print_exec(event)
+
+
+#
+# print_exec()
+#
+def print_exec(event):
+    print("{:<10} {:<18.9f} {:<4} {:<16} {:<10} {:<32} {:<4} {:<10} {:<10}".
+          format(Event(event.type).name,
+                 event.ts / 1000000000,
+                 event.cpu,
+                 event.comm.decode("utf-8"),
+                 event.pid,
+                 "-",
+                 "-",
+                 event.pkt_size,
+                 "-"))
+    #
+    # Debug data.
+    #
+    print("  DBG: packet_type = {}".format(event.packet_type))
+
+    #
+    # Decode packet only if there is data
+    #
+    if event.pkt_size <= 0:
+        return
+
+    pkt_id = get_pkt_id()
+
+    if event.pkt_size < options.packet_size:
+        pkt_len = event.pkt_size
+        pkt_data = bytes(event.pkt)[:event.pkt_size]
+    else:
+        pkt_len = options.packet_size
+        pkt_data = bytes(event.pkt)
+
+    if options.packet_decode != 'none' or options.pcap is not None:
+        print("  {}: Sent execute, packet size {} bytes, size "
+              "captured {} bytes.".format(pkt_id, event.pkt_size,
+                                          pkt_len))
+
+    if options.packet_decode == 'hex':
+        print(re.sub('^', ' ' * 4, hexdump(pkt_data, dump=True),
+                     flags=re.MULTILINE))
+
+    packet = Ether(pkt_data)
+    packet.wirelen = event.pkt_size
+
+    if options.packet_decode == 'decode':
+        print(re.sub('^', ' ' * 4, packet.show(dump=True), flags=re.MULTILINE))
+
+    if options.pcap is not None:
+        wrpcap(options.pcap, packet, append=True, snaplen=options.packet_size)
+
+
+#
+# print_upcall()
+#
+def print_upcall(event):
+    print("{:<10} {:<18.9f} {:<4} {:<16} {:<10} {:<32} {:<4} {:<10} {:<10}".
+          format(Event(event.type).name,
+                 event.ts / 1000000000,
                  event.cpu,
                  event.comm.decode("utf-8"),
                  event.pid,
@@ -421,6 +595,8 @@ def main():
                         help='Display packet content in selected mode, '
                         'default none',
                         choices=['none', 'hex', 'decode'], default='none')
+    parser.add_argument("-e", "--exec", action="store_true",
+                        help="Capture op_flow_execute events")
     parser.add_argument("-f", "--flow-key-size",
                         help="Set maximum flow key size to capture, "
                         "default 64", type=buffer_size_type, default=64,
@@ -475,7 +651,7 @@ def main():
     #
     u = USDT(pid=int(options.pid))
     try:
-        u.enable_probe(probe="recv_upcall", fn_name="do_trace")
+        u.enable_probe(probe="recv_upcall", fn_name="do_upcall_trace")
     except USDTException as e:
         print("ERROR: {}"
               "ovs-vswitchd!".format(
@@ -483,6 +659,17 @@ def main():
                   replace("--with-dtrace or --enable-dtrace",
                           "--enable-usdt-probes")))
         sys.exit(-1)
+
+    if options.exec:
+        try:
+            u.enable_probe(probe="op_flow_execute", fn_name="do_exec_trace")
+        except USDTException as e:
+            print("ERROR: {}"
+                  "ovs-vswitchd!".format(
+                      (re.sub('^', ' ' * 7, str(e), flags=re.MULTILINE)).
+                      strip().replace("--with-dtrace or --enable-dtrace",
+                                      "--enable-usdt-probes")))
+            sys.exit(-1)
 
     #
     # Uncomment to see how arguments are decoded.
@@ -496,15 +683,18 @@ def main():
     source = source.replace("<MAX_KEY_VAL>", str(options.flow_key_size))
     source = source.replace("<BUFFER_PAGE_CNT>",
                             str(options.buffer_page_count))
+    source = source.replace("<EVENT_ENUM>", "\n".join(
+        ["    EVENT_{} = {},".format(
+            event.name, event.value) for event in Event]))
 
     b = BPF(text=source, usdt_contexts=[u], debug=options.debug)
 
     #
     # Print header
     #
-    print("{:<18} {:<4} {:<16} {:<10} {:<32} {:<4} {:<10} {:<10}".format(
-        "TIME", "CPU", "COMM", "PID", "DPIF_NAME", "TYPE", "PKT_LEN",
-        "FLOW_KEY_LEN"))
+    print("{:<10} {:<18} {:<4} {:<16} {:<10} {:<32} {:<4} {:<10} {:<10}".
+          format("EVENT", "TIME", "CPU", "COMM", "PID", "DPIF_NAME", "TYPE",
+                 "PKT_LEN", "FLOW_KEY_LEN"))
 
     #
     # Dump out all events
