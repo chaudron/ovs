@@ -145,6 +145,7 @@ odp_action_len(uint16_t type)
     case OVS_ACTION_ATTR_ADD_MPLS: return sizeof(struct ovs_action_add_mpls);
     case OVS_ACTION_ATTR_DEC_TTL: return ATTR_LEN_VARIABLE;
     case OVS_ACTION_ATTR_DROP: return sizeof(uint32_t);
+    case OVS_ACTION_ATTR_EMIT_SAMPLE: return ATTR_LEN_VARIABLE;
 
     case OVS_ACTION_ATTR_UNSPEC:
     case __OVS_ACTION_ATTR_MAX:
@@ -1151,6 +1152,36 @@ format_dec_ttl_action(struct ds *ds, const struct nlattr *attr,
 }
 
 static void
+format_odp_emit_sample_action(struct ds *ds, const struct nlattr *attr)
+{
+    const struct nlattr *a;
+    unsigned int left;
+
+    ds_put_cstr(ds, "emit_sample(");
+
+    NL_ATTR_FOR_EACH (a, left,
+                      nl_attr_get(attr), nl_attr_get_size(attr)) {
+        switch (a->nla_type) {
+        case OVS_EMIT_SAMPLE_ATTR_GROUP:
+            ds_put_format(ds, "group=%"PRIu32",", nl_attr_get_u32(a));
+            break;
+        case OVS_EMIT_SAMPLE_ATTR_COOKIE: {
+            const uint8_t *cookie = nl_attr_get(a);
+            int i;
+
+            ds_put_cstr(ds, "cookie=");
+            for (i = 0; i < nl_attr_get_size(a); i++) {
+                ds_put_format(ds, "%02x", cookie[i]);
+            }
+            break;
+        }
+        }
+    }
+    ds_chomp(ds, ',');
+    ds_put_char(ds, ')');
+}
+
+static void
 format_odp_action(struct ds *ds, const struct nlattr *a,
                   const struct hmap *portno_names)
 {
@@ -1308,6 +1339,9 @@ format_odp_action(struct ds *ds, const struct nlattr *a,
         break;
     case OVS_ACTION_ATTR_DROP:
         ds_put_cstr(ds, "drop");
+        break;
+    case OVS_ACTION_ATTR_EMIT_SAMPLE:
+        format_odp_emit_sample_action(ds, a);
         break;
     case OVS_ACTION_ATTR_UNSPEC:
     case __OVS_ACTION_ATTR_MAX:
@@ -2359,6 +2393,50 @@ out:
 }
 
 static int
+parse_odp_emit_sample_action(const char *s, struct ofpbuf *actions)
+{
+    uint8_t cookie[OVS_EMIT_SAMPLE_COOKIE_MAX_SIZE];
+    char buf[2 * OVS_EMIT_SAMPLE_COOKIE_MAX_SIZE + 1];
+    bool has_group = false;
+    size_t cookie_len = 0;
+    uint32_t group;
+    int n = 0;
+
+    if (!ovs_scan_len(s, &n, "emit_sample(")) {
+        return -EINVAL;
+    }
+
+    while (s[n] != ')') {
+        n += strspn(s + n, delimiters);
+
+        if (!has_group && ovs_scan_len(s, &n, "group=%"SCNi32, &group)) {
+            has_group = true;
+            continue;
+        }
+
+        if (!cookie_len &&
+            ovs_scan_len(s, &n, "cookie=%32[0-9a-fA-F]", buf) && n > 7) {
+            struct ofpbuf b;
+
+            ofpbuf_use_stub(&b, cookie, OVS_EMIT_SAMPLE_COOKIE_MAX_SIZE);
+            ofpbuf_put_hex(&b, buf, &cookie_len);
+            ofpbuf_uninit(&b);
+            continue;
+        }
+        return -EINVAL;
+    }
+    n++;
+
+    if (!has_group) {
+        return -EINVAL;
+    }
+
+    odp_put_emit_sample_action(actions, group, cookie_len ? cookie : NULL,
+                               cookie_len);
+    return n;
+}
+
+static int
 parse_action_list(struct parse_odp_context *context, const char *s,
                   struct ofpbuf *actions)
 {
@@ -2716,6 +2794,12 @@ parse_odp_action__(struct parse_odp_context *context, const char *s,
             nl_msg_put_unspec(actions, OVS_ACTION_ATTR_ADD_MPLS,
                               &mpls, sizeof mpls);
             return n;
+        }
+    }
+
+    {
+        if (!strncmp(s, "emit_sample(", 12)) {
+            return parse_odp_emit_sample_action(s, actions);
         }
     }
 
@@ -7826,6 +7910,25 @@ odp_put_tnl_push_action(struct ofpbuf *odp_actions,
 
     size += data->header_len;
     nl_msg_put_unspec(odp_actions, OVS_ACTION_ATTR_TUNNEL_PUSH, data, size);
+}
+
+void
+odp_put_emit_sample_action(struct ofpbuf *odp_actions,
+                           uint32_t group_id,
+                           uint8_t *cookie,
+                           size_t cookie_len)
+{
+    size_t offset = nl_msg_start_nested_with_flag(odp_actions,
+                                                  OVS_ACTION_ATTR_EMIT_SAMPLE);
+
+    nl_msg_put_u32(odp_actions, OVS_EMIT_SAMPLE_ATTR_GROUP, group_id);
+    if (cookie && cookie_len) {
+        ovs_assert(cookie_len <= OVS_EMIT_SAMPLE_COOKIE_MAX_SIZE);
+        nl_msg_put_unspec(odp_actions, OVS_EMIT_SAMPLE_ATTR_COOKIE, cookie,
+                          cookie_len);
+    }
+
+    nl_msg_end_nested(odp_actions, offset);
 }
 
 
