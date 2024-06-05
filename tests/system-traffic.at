@@ -8977,3 +8977,108 @@ OVS_WAIT_UNTIL([cat p2.pcap | grep -E "0x0050: *0000 *0000 *5002 *2000 *b85e *00
 
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
+
+AT_SETUP([emit_sample])
+OVS_TRAFFIC_VSWITCHD_START()
+OVS_CHECK_EMIT_SAMPLE()
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+NS_CHECK_EXEC([at_ns0], [sysctl -w net.ipv6.conf.all.disable_ipv6=1], [0], [ignore])
+NS_CHECK_EXEC([at_ns1], [sysctl -w net.ipv6.conf.all.disable_ipv6=1], [0], [ignore])
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24", "e4:11:22:33:44:55")
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/24", "e4:11:22:33:44:66")
+
+NS_CHECK_EXEC([at_ns0], [arp -s 10.1.1.2 e4:11:22:33:44:66])
+NS_CHECK_EXEC([at_ns1], [arp -s 10.1.1.1 e4:11:22:33:44:55])
+
+
+AT_CHECK([ovs-appctl vlog/set dpif:dbg dpif_netdev:dbg ofproto_dpif_upcall:dbg])
+
+AT_CHECK([ovs-vsctl -- --id=@br0 get Bridge br0 \
+                    -- --id=@ipfix create IPFIX targets=\"127.0.0.1:4739\" \
+                    -- create Flow_Sample_Collector_Set id=1 bridge=@br0 ipfix=@ipfix, local_sample_group=10 \
+                    -- create Flow_Sample_Collector_Set id=2 bridge=@br0 ipfix=@ipfix, local_sample_group=12],
+         [0], [ignore])
+
+AT_DATA([flows.txt], [dnl
+in_port=ovs-p0,ip actions=sample(probability=65535,collector_set_id=1,obs_domain_id=1431655765,obs_point_id=1717986918),output(port=ovs-p1,max_len=100)
+in_port=ovs-p1,ip actions=sample(probability=65535,collector_set_id=2,obs_domain_id=2290649224,obs_point_id=2576980377),output(port=ovs-p0,max_len=100)
+])
+
+AT_CHECK([ovs-ofctl add-flows br0 flows.txt])
+
+OVS_DAEMONIZE([ovstest test-psample > psample.out], [psample1.pid])
+
+NS_CHECK_EXEC([at_ns0], [ping -q -c 1 10.1.1.2 | FORMAT_PING], [0], [dnl
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+])
+
+m4_define([SAMPLE1], [group_id=0xa obs_domain=0x55555555,obs_point=0x66666666 .*icmp.*nw_src=10.1.1.1,nw_dst=10.1.1.2])
+m4_define([SAMPLE2], [group_id=0xc obs_domain=0x88888888,obs_point=0x99999999 .*icmp.*nw_src=10.1.1.2,nw_dst=10.1.1.1])
+AT_CHECK([grep -E 'SAMPLE1' psample.out >/dev/null])
+AT_CHECK([grep -E 'SAMPLE2' psample.out >/dev/null])
+
+AT_CHECK([ovs-ofctl dump-ipfix-flow br0 | sed 's/tx pkts=[[0-9]]*/tx pkts=24/' | sed 's/tx errs=[[0-9]]*/tx errs=0/'], [0], [dnl
+NXST_IPFIX_FLOW reply (xid=0x2): 2 ids
+  id   1: flows=1, current flows=0, sampled pkts=1, ipv4 ok=1, ipv6 ok=0, tx pkts=24
+          pkts errs=0, ipv4 errs=0, ipv6 errs=0, tx errs=0
+  id   2: flows=1, current flows=0, sampled pkts=1, ipv4 ok=1, ipv6 ok=0, tx pkts=24
+          pkts errs=0, ipv4 errs=0, ipv6 errs=0, tx errs=0
+])
+
+AT_CHECK([ovs-appctl lsample/show br0], [0], [dnl
+local sample statistics for bridge "br0":
+- Collector Set ID: 1
+  Local Sample Group: 10
+  Total number of bytes: 98
+  Total number of packets: 1
+
+- Collector Set ID: 2
+  Local Sample Group: 12
+  Total number of bytes: 98
+  Total number of packets: 1
+])
+
+# Disable trunc feature to force traffic to go through slow path.
+AT_CHECK([ovs-appctl dpif/set-dp-features br0 trunc false])
+
+AT_CHECK([ovs-appctl ofproto/trace br0 'in_port=ovs-p0,dl_src=e4:11:22:33:44:55,dl_dst=e4:11:22:33:44:66,dl_type=0x0800,nw_src=10.1.1.1,nw_dst=10.1.1.12'], [0], [stdout])
+AT_CHECK([tail -3 stdout], [0], [dnl
+Datapath actions: emit_sample(group=10,cookie=5555555566666666),userspace(pid=4294967295,flow_sample(probability=65535,collector_set_id=1,obs_domain_id=1431655765,obs_point_id=1717986918,output_port=4294967295)),trunc(100),3
+This flow is handled by the userspace slow path because it:
+  - Uses action(s) not supported by datapath.
+])
+
+OVS_DAEMONIZE([ovstest test-psample > psample_slow.out], [psample_slow.pid])
+
+NS_CHECK_EXEC([at_ns0], [ping -q -c 1 10.1.1.2 | FORMAT_PING], [0], [dnl
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+])
+
+AT_CHECK([grep -E 'SAMPLE1' psample_slow.out >/dev/null])
+AT_CHECK([grep -E 'SAMPLE2' psample_slow.out >/dev/null])
+
+AT_CHECK([ovs-ofctl dump-ipfix-flow br0 | sed 's/tx pkts=[[0-9]]*/tx pkts=24/' | sed 's/tx errs=[[0-9]]*/tx errs=0/'], [0], [dnl
+NXST_IPFIX_FLOW reply (xid=0x2): 2 ids
+  id   1: flows=2, current flows=0, sampled pkts=2, ipv4 ok=2, ipv6 ok=0, tx pkts=24
+          pkts errs=0, ipv4 errs=0, ipv6 errs=0, tx errs=0
+  id   2: flows=2, current flows=0, sampled pkts=2, ipv4 ok=2, ipv6 ok=0, tx pkts=24
+          pkts errs=0, ipv4 errs=0, ipv6 errs=0, tx errs=0
+])
+
+AT_CHECK([ovs-appctl lsample/show br0], [0], [dnl
+local sample statistics for bridge "br0":
+- Collector Set ID: 1
+  Local Sample Group: 10
+  Total number of bytes: 196
+  Total number of packets: 2
+
+- Collector Set ID: 2
+  Local Sample Group: 12
+  Total number of bytes: 196
+  Total number of packets: 2
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP(["/sending to collector failed/d"])
+AT_CLEANUP
