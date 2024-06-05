@@ -7,6 +7,10 @@ Post-v3.3.0
    - The primary development branch has been renamed from 'master' to 'main'.
      The OVS tree remains hosted on GitHub.
      https://github.com/openvswitch/ovs.git
+   - Local sampling is introduced. It reuses the OpenFlow sample action and
+     allows samples to be emitted locally (instead of via IPFIX) in a
+     datapath-specific manner via the new datapath action called "emit_sample".
+     Linux kernel datapath is the first to support this feature.
 
 
 v3.3.0 - 16 Feb 2024
