@@ -18,6 +18,7 @@
 #include "ofproto-dpif-lsample.h"
 
 #include "cmap.h"
+#include "dpif.h"
 #include "hash.h"
 #include "ofproto.h"
 #include "openvswitch/thread.h"
@@ -44,6 +45,8 @@ struct dpif_lsample {
 
 struct lsample_exporter {
     struct ofproto_lsample_options options;
+    atomic_uint64_t n_packets;
+    atomic_uint64_t n_bytes;
 };
 
 struct lsample_exporter_node {
@@ -154,6 +157,21 @@ dpif_lsample_get_group_id(struct dpif_lsample *ps, uint32_t collector_set_id,
         *group_id = node->exporter.options.group_id;
     }
     return found;
+}
+
+void
+dpif_lsample_credit_stats(struct dpif_lsample *lsample,
+                          uint32_t collector_set_id,
+                          const struct dpif_flow_stats *stats)
+{
+    struct lsample_exporter_node *node;
+    uint64_t orig;
+
+    node = dpif_lsample_find_exporter_node(lsample, collector_set_id);
+    if (node) {
+        atomic_add_relaxed(&node->exporter.n_packets, stats->n_packets, &orig);
+        atomic_add_relaxed(&node->exporter.n_bytes, stats->n_bytes, &orig);
+    }
 }
 
 struct dpif_lsample *
