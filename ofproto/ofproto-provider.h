@@ -1479,6 +1479,15 @@ struct ofproto_class {
         const struct ofproto_ipfix_flow_exporter_options
             *flow_exporters_options, size_t n_flow_exporters_options);
 
+    /* Configures local sampling on 'ofproto' according to the options array
+     * of 'options' which contains 'n_options' elements.
+     *
+     * EOPNOTSUPP as a return value indicates that 'ofproto' does not support
+     * local sampling. */
+    int (*set_local_sample)(struct ofproto *ofproto,
+                            const struct ofproto_lsample_options *options,
+                            size_t n_options);
+
     /* Gets IPFIX stats on 'ofproto' according to the exporter of birdge
      * IPFIX or flow-based IPFIX.
      *

@@ -49,6 +49,7 @@
 #include "ofproto-dpif-sflow.h"
 #include "ofproto-dpif-trace.h"
 #include "ofproto-dpif-upcall.h"
+#include "ofproto-dpif-lsample.h"
 #include "ofproto-dpif-xlate.h"
 #include "ofproto-dpif-xlate-cache.h"
 #include "openvswitch/ofp-actions.h"
@@ -2513,6 +2514,41 @@ get_ipfix_stats(const struct ofproto *ofproto_,
     }
 
     return dpif_ipfix_get_stats(di, bridge_ipfix, replies);
+}
+
+static int
+set_local_sample(struct ofproto *ofproto_,
+                 const struct ofproto_lsample_options *options,
+                 size_t n_opts)
+{
+    struct ofproto_dpif *ofproto = ofproto_dpif_cast(ofproto_);
+    struct dpif_lsample *lsample = ofproto->lsample;
+    bool changed = false;
+
+    if (!ofproto->backer->rt_support.emit_sample) {
+        return ENOTSUP;
+    }
+
+    if (n_opts && !lsample) {
+        lsample = ofproto->lsample = dpif_lsample_create();
+        changed = true;
+    }
+
+    if (lsample) {
+        if (!n_opts) {
+            dpif_lsample_unref(lsample);
+            lsample = ofproto->lsample = NULL;
+            changed = true;
+        } else {
+            changed |= dpif_lsample_set_options(lsample, options, n_opts);
+        }
+    }
+
+    if (changed) {
+        ofproto->backer->need_revalidate = REV_RECONFIGURE;
+    }
+
+    return 0;
 }
 
 static int
@@ -7085,6 +7121,7 @@ const struct ofproto_class ofproto_dpif_class = {
     get_netflow_ids,
     set_sflow,
     set_ipfix,
+    set_local_sample,
     get_ipfix_stats,
     set_cfm,
     cfm_status_changed,

@@ -103,6 +103,11 @@ struct ofproto_ipfix_flow_exporter_options {
     char *virtual_obs_id;
 };
 
+struct ofproto_lsample_options {
+    uint32_t collector_set_id;
+    uint32_t group_id;
+};
+
 struct ofproto_rstp_status {
     bool enabled;               /* If false, ignore other members. */
     rstp_identifier root_id;
@@ -390,6 +395,9 @@ void ofproto_ct_zone_limit_protection_update(const char *datapath_type,
                                              bool protected);
 void ofproto_get_datapath_cap(const char *datapath_type,
                               struct smap *dp_cap);
+int ofproto_set_local_sample(struct ofproto *ofproto,
+                             const struct ofproto_lsample_options *,
+                             size_t n_options);
 
 /* Configuration of ports. */
 void ofproto_port_unregister(struct ofproto *, ofp_port_t ofp_port);
