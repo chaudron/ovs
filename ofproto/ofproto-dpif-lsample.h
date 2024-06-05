@@ -36,6 +36,7 @@ bool dpif_lsample_set_options(struct dpif_lsample *,
 bool dpif_lsample_get_group_id(struct dpif_lsample *,
                                uint32_t collector_set_id,
                                uint32_t *group_id);
+void dpif_lsample_init(void);
 
 void dpif_lsample_credit_stats(struct dpif_lsample *,
                                uint32_t collector_set_id,
