@@ -873,6 +873,12 @@ ovs_lb_output_action_supported(struct ofproto_dpif *ofproto)
     return ofproto->backer->rt_support.lb_output_action;
 }
 
+bool
+ovs_emit_sample_supported(struct ofproto_dpif *ofproto)
+{
+    return ofproto->backer->rt_support.emit_sample;
+}
+
 /* Tests whether 'backer''s datapath supports recirculation.  Only newer
  * datapaths support OVS_KEY_ATTR_RECIRC_ID in keys.  We need to disable some
  * features on older datapaths that don't support this feature.
@@ -1609,6 +1615,44 @@ check_add_mpls(struct dpif_backer *backer)
     return supported;
 }
 
+/* Tests whether 'backer''s datapath supports the OVS_ACTION_ATTR_EMIT_SAMPLE
+ * action. */
+static bool
+check_emit_sample(struct dpif_backer *backer)
+{
+    uint8_t cookie[OVS_EMIT_SAMPLE_COOKIE_MAX_SIZE];
+    struct odputil_keybuf keybuf;
+    struct ofpbuf actions;
+    struct ofpbuf key;
+    struct flow flow;
+    bool supported;
+
+    struct odp_flow_key_parms odp_parms = {
+        .flow = &flow,
+        .probe = true,
+    };
+
+    memset(&flow, 0, sizeof flow);
+    ofpbuf_use_stack(&key, &keybuf, sizeof keybuf);
+    odp_flow_key_from_flow(&odp_parms, &key);
+    ofpbuf_init(&actions, 64);
+
+    /* Generate a random max-size cookie. */
+    random_bytes(cookie, sizeof(cookie));
+
+    odp_put_emit_sample_action(&actions, 10, cookie, sizeof cookie);
+
+    supported = dpif_may_support_emit_sample(backer->dpif) &&
+        dpif_probe_feature(backer->dpif, "emit_sample", &key, &actions, NULL);
+
+    ofpbuf_uninit(&actions);
+    VLOG_INFO("%s: Datapath %s emit_sample",
+              dpif_name(backer->dpif),
+              supported ? "supports" : "does not support");
+    return supported;
+}
+
+
 #define CHECK_FEATURE__(NAME, SUPPORT, FIELD, VALUE, ETHTYPE)               \
 static bool                                                                 \
 check_##NAME(struct dpif_backer *backer)                                    \
@@ -1698,6 +1742,7 @@ check_support(struct dpif_backer *backer)
         dpif_supports_lb_output_action(backer->dpif);
     backer->rt_support.ct_zero_snat = dpif_supports_ct_zero_snat(backer);
     backer->rt_support.add_mpls = check_add_mpls(backer);
+    backer->rt_support.emit_sample = check_emit_sample(backer);
 
     /* Flow fields. */
     backer->rt_support.odp.ct_state = check_ct_state(backer);
