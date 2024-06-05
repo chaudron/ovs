@@ -485,7 +485,7 @@ type_run(const char *type)
                               ofproto->backer->dpif, ofproto->ml,
                               ofproto->stp, ofproto->rstp, ofproto->ms,
                               ofproto->mbridge, ofproto->sflow, ofproto->ipfix,
-                              ofproto->netflow,
+                              ofproto->netflow, ofproto->lsample,
                               ofproto->up.forward_bpdu,
                               connmgr_has_in_band(ofproto->up.connmgr),
                               &ofproto->backer->rt_support);

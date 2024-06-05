@@ -19,6 +19,7 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 struct dpif_lsample;
 struct ofproto_lsample_options;
@@ -31,4 +32,9 @@ bool dpif_lsample_set_options(struct dpif_lsample *,
                               const struct ofproto_lsample_options *,
                               size_t n_opts);
 
+bool dpif_lsample_get_group_id(struct dpif_lsample *,
+                               uint32_t collector_set_id,
+                               uint32_t *group_id);
+
 #endif /* OFPROTO_DPIF_LSAMPLE_H */
+

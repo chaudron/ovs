@@ -177,7 +177,8 @@ void xlate_ofproto_set(struct ofproto_dpif *, const char *name, struct dpif *,
                        struct rstp *, const struct mcast_snooping *,
                        const struct mbridge *, const struct dpif_sflow *,
                        const struct dpif_ipfix *, const struct netflow *,
-                       bool forward_bpdu, bool has_in_band,
+                       const struct dpif_lsample *, bool forward_bpdu,
+                       bool has_in_band,
                        const struct dpif_backer_support *support);
 void xlate_remove_ofproto(struct ofproto_dpif *);
 struct ofproto_dpif *xlate_ofproto_lookup(const struct uuid *uuid);
