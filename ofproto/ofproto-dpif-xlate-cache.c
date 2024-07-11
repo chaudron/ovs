@@ -35,9 +35,10 @@
 #include "learn.h"
 #include "mac-learning.h"
 #include "netdev-vport.h"
+#include "ofproto/ofproto-dpif.h"
+#include "ofproto/ofproto-dpif-lsample.h"
 #include "ofproto/ofproto-dpif-mirror.h"
 #include "ofproto/ofproto-dpif-xlate.h"
-#include "ofproto/ofproto-dpif.h"
 #include "ofproto/ofproto-provider.h"
 #include "openvswitch/dynamic-string.h"
 #include "openvswitch/vlog.h"
@@ -162,6 +163,11 @@ xlate_push_stats_entry(struct xc_entry *entry,
         }
 
         break;
+    case XC_LSAMPLE:
+        dpif_lsample_credit_stats(entry->lsample.lsample,
+                                  entry->lsample.collector_set_id,
+                                  stats);
+        break;
     default:
         OVS_NOT_REACHED();
     }
@@ -244,6 +250,9 @@ xlate_cache_clear_entry(struct xc_entry *entry)
     case XC_TNL_NEIGH:
         break;
     case XC_TUNNEL_HEADER:
+        break;
+    case XC_LSAMPLE:
+        dpif_lsample_unref(entry->lsample.lsample);
         break;
     default:
         OVS_NOT_REACHED();

@@ -5159,6 +5159,7 @@ ofproto_dpif_xcache_execute(struct ofproto_dpif *ofproto,
         case XC_GROUP:
         case XC_TNL_NEIGH:
         case XC_TUNNEL_HEADER:
+        case XC_LSAMPLE:
             xlate_push_stats_entry(entry, stats, false);
             break;
         default:

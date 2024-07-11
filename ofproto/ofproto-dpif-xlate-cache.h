@@ -29,6 +29,7 @@
 struct bfd;
 struct bond;
 struct dpif_flow_stats;
+struct dpif_lsample;
 struct flow;
 struct group_dpif;
 struct mbridge;
@@ -53,6 +54,7 @@ enum xc_type {
     XC_GROUP,
     XC_TNL_NEIGH,
     XC_TUNNEL_HEADER,
+    XC_LSAMPLE,
 };
 
 /* xlate_cache entries hold enough information to perform the side effects of
@@ -126,6 +128,10 @@ struct xc_entry {
             } operation;
             uint16_t hdr_size;
         } tunnel_hdr;
+        struct {
+            struct dpif_lsample *lsample;
+            uint32_t collector_set_id;
+        } lsample;
     };
 };
 

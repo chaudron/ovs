@@ -23,6 +23,7 @@
 
 struct dpif_lsample;
 struct ofproto_lsample_options;
+struct dpif_flow_stats;
 
 struct dpif_lsample *dpif_lsample_create(void);
 
@@ -37,4 +38,7 @@ bool dpif_lsample_get_group_id(struct dpif_lsample *,
                                uint32_t collector_set_id,
                                uint32_t *group_id);
 
+void dpif_lsample_credit_stats(struct dpif_lsample *,
+                               uint32_t collector_set_id,
+                               const struct dpif_flow_stats *);
 #endif /* OFPROTO_DPIF_LSAMPLE_H */
