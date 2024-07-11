@@ -29,6 +29,8 @@ Post-v3.3.0
      support this feature by using the new datapath "psample" action.
    - A new unixctl command 'lsample/show' shows packet and bytes statistics
      per local sample exporter.
+   - OpenFlow: a new version of the "sample" action is introduced that allows
+     the use of subfields in obs_point_id and obs_domain_id.
 
 
 v3.3.0 - 16 Feb 2024

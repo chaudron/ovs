@@ -2201,13 +2201,17 @@ The following *argument* forms are accepted:
     The unsigned 32-bit integer identifier of the set of sample collectors to
     send sampled packets to.  Defaults to 0.
 
-  ``obs_domain_id=``\ *id*
+  ``obs_domain_id=``\ *value*
     When sending samples to IPFIX collectors, the unsigned 32-bit integer
-    Observation Domain ID sent in every IPFIX flow record.  Defaults to 0.
+    Observation Domain ID sent in every IPFIX flow record. The *value* may
+    be specified as a 32-bit integer or a field or subfield in the syntax
+    described under `Field Specifications`_ above. Defaults to 0.
 
-  ``obs_point_id=``\ *id*
+  ``obs_point_id=``\ *value*
     When sending samples to IPFIX collectors, the unsigned 32-bit integer
-    Observation Point ID sent in every IPFIX flow record.  Defaults to 0.
+    Observation Point ID sent in every IPFIX flow record. The *value* may
+    be specified as a 32-bit integer or a field or subfield in the syntax
+    described under `Field Specifications`_ above. Defaults to 0.
 
   ``sampling_port=``\ *port*
     Sample packets on *port*, which should be the ingress or egress port.  This
