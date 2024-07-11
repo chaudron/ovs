@@ -21,7 +21,10 @@
 #include "dpif.h"
 #include "hash.h"
 #include "ofproto.h"
+#include "ofproto-dpif.h"
+#include "openvswitch/dynamic-string.h"
 #include "openvswitch/thread.h"
+#include "unixctl.h"
 
 /* Dpif local sampling.
  *
@@ -217,5 +220,113 @@ dpif_lsample_unref(struct dpif_lsample *lsample)
 {
     if (lsample && ovs_refcount_unref_relaxed(&lsample->ref_cnt) == 1) {
         dpif_lsample_destroy(lsample);
+    }
+}
+
+static int
+comp_exporter_collector_id(const void *a_, const void *b_)
+{
+    const struct lsample_exporter_node *a, *b;
+
+    a = *(struct lsample_exporter_node **) a_;
+    b = *(struct lsample_exporter_node **) b_;
+
+    if (a->exporter.options.collector_set_id >
+        b->exporter.options.collector_set_id) {
+        return 1;
+    }
+    if (a->exporter.options.collector_set_id <
+        b->exporter.options.collector_set_id) {
+        return -1;
+    }
+    return 0;
+}
+
+static void
+lsample_exporter_list(struct dpif_lsample *lsample,
+                      struct lsample_exporter_node ***list,
+                      size_t *num_exporters)
+{
+    struct lsample_exporter_node **exporter_list;
+    struct lsample_exporter_node *node;
+    size_t k = 0, n;
+
+    n = cmap_count(&lsample->exporters);
+
+    exporter_list = xcalloc(n, sizeof *exporter_list);
+
+    CMAP_FOR_EACH (node, node, &lsample->exporters) {
+        if (k >= n) {
+            break;
+        }
+        exporter_list[k++] = node;
+    }
+
+    qsort(exporter_list, k, sizeof *exporter_list, comp_exporter_collector_id);
+
+    *list = exporter_list;
+    *num_exporters = k;
+}
+
+static void
+lsample_unixctl_show(struct unixctl_conn *conn, int argc OVS_UNUSED,
+                     const char *argv[] OVS_UNUSED, void *aux OVS_UNUSED)
+{
+    struct lsample_exporter_node **node_list = NULL;
+    struct ds ds = DS_EMPTY_INITIALIZER;
+    const struct ofproto_dpif *ofproto;
+    size_t i, num;
+
+    ofproto = ofproto_dpif_lookup_by_name(argv[1]);
+    if (!ofproto) {
+        unixctl_command_reply_error(conn, "no such bridge");
+        return;
+    }
+
+    if (!ofproto->lsample) {
+        unixctl_command_reply_error(conn,
+                                    "no local sampling exporters configured");
+        return;
+    }
+
+    ds_put_format(&ds, "Local sample statistics for bridge \"%s\":\n",
+                  argv[1]);
+
+    lsample_exporter_list(ofproto->lsample, &node_list, &num);
+
+    for (i = 0; i < num; i++) {
+        uint64_t n_bytes;
+        uint64_t n_packets;
+
+        struct lsample_exporter_node *node = node_list[i];
+
+        atomic_read_relaxed(&node->exporter.n_packets, &n_packets);
+        atomic_read_relaxed(&node->exporter.n_bytes, &n_bytes);
+
+        if (i) {
+            ds_put_cstr(&ds, "\n");
+        }
+
+        ds_put_format(&ds, "Collector Set ID: %"PRIu32":\n",
+                    node->exporter.options.collector_set_id);
+        ds_put_format(&ds, "  Group ID     : %"PRIu32"\n",
+                    node->exporter.options.group_id);
+        ds_put_format(&ds, "  Total packets: %"PRIu64"\n", n_packets);
+        ds_put_format(&ds, "  Total bytes  : %"PRIu64"\n", n_bytes);
+    }
+
+    free(node_list);
+    unixctl_command_reply(conn, ds_cstr(&ds));
+    ds_destroy(&ds);
+}
+
+void dpif_lsample_init(void)
+{
+    static struct ovsthread_once once = OVSTHREAD_ONCE_INITIALIZER;
+
+    if (ovsthread_once_start(&once)) {
+        unixctl_command_register("lsample/show", "bridge", 1, 1,
+                                 lsample_unixctl_show, NULL);
+        ovsthread_once_done(&once);
     }
 }

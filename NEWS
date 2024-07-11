@@ -27,6 +27,8 @@ Post-v3.3.0
      allows samples to be emitted locally (instead of via IPFIX) in a
      datapath-specific manner.  The Linux kernel datapath is the first to
      support this feature by using the new datapath "psample" action.
+   - A new unixctl command 'lsample/show' shows packet and bytes statistics
+     per local sample exporter.
 
 
 v3.3.0 - 16 Feb 2024

@@ -287,6 +287,7 @@ init(const struct shash *iface_hints)
     ofproto_unixctl_init();
     ofproto_dpif_trace_init();
     udpif_init();
+    dpif_lsample_init();
 }
 
 static void
