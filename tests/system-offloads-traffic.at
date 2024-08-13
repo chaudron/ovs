@@ -93,6 +93,70 @@ AT_CHECK([ovs-appctl upcall/show | grep -E "offloaded flows : [[1-9]]"], [0], [i
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
 
+AT_SETUP([offloads - Forced removed datapath entries])
+OVS_TRAFFIC_VSWITCHD_START([], [], [-- set Open_vSwitch . other_config:hw-offload=true])
+
+AT_CHECK([ovs-ofctl add-flow br0 "actions=normal"])
+
+ADD_NAMESPACES(at_ns0, at_ns1)
+
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+ADD_VETH(p1, at_ns1, br0, "10.1.1.2/24")
+AT_CHECK([ovs-appctl dpctl/dump-flows], [0], [ignore])
+
+AT_CHECK([ovs-appctl vlog/set ofproto_dpif_upcall:dbg])
+
+dnl Set idle timeout to 1 second.
+AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:max-idle=1000])
+
+NS_CHECK_EXEC([at_ns0], [ping -q -c 10 -i 0.1 -W 2 10.1.1.2 | FORMAT_PING], [0], [dnl
+10 packets transmitted, 10 received, 0% packet loss, time 0ms
+])
+
+AT_CHECK([ovs-appctl dpctl/dump-flows type=tc,offloaded | grep "eth_type(0x0800)" | DUMP_CLEAN_SORTED], [0], [dnl
+in_port(2),eth(macs),eth_type(0x0800),ipv4(frag=no), packets:9, bytes:756, used:0.001s, actions:output
+in_port(3),eth(macs),eth_type(0x0800),ipv4(frag=no), packets:9, bytes:756, used:0.001s, actions:output
+])
+
+AT_CHECK([ovs-appctl dpctl/dump-flows type=tc,offloaded | grep -q "arp" ], [0])
+
+dnl Delete IPv4 entries, but keep the ARP ones.
+AT_CHECK([tc filter del dev ovs-p0 ingress protocol ip pref 2])
+AT_CHECK([tc filter del dev ovs-p1 ingress protocol ip pref 2])
+
+dnl Bring the remote ports down to avoid traffic.
+AT_CHECK([ip -n at_ns0 link set p0 down])
+AT_CHECK([ip -n at_ns1 link set p1 down])
+
+dnl Wait until the ARP flow has timed out.
+OVS_WAIT_UNTIL([test `ovs-appctl dpctl/dump-flows type=tc,offloaded | \
+                  grep "arp" | wc -l` -eq 0])
+
+dnl Set max-idle to 10 ms, so we are sure the max-idle * 2 has been reached.
+AT_CHECK([ovs-vsctl set Open_vSwitch . other_config:max-idle=10])
+
+dnl Add and delete a port to force the revalidation.
+for i in `seq 3`; do
+  REV_RECONFIGURE=$(ovs-appctl coverage/read-counter rev_reconfigure)
+  AT_CHECK([ovs-vsctl add-port br0 ovs-p2 -- \
+              set interface ovs-p2 type=internal])
+  AT_CHECK([ovs-vsctl del-port ovs-p2 ])
+  OVS_WAIT_UNTIL([test `ovs-appctl coverage/read-counter rev_reconfigure` \
+                    -gt $REV_RECONFIGURE])
+done
+
+dnl Wait for another full round of revalidation.  After this all ukeys should
+dnl be gone.
+AT_CHECK([ovs-appctl revalidator/wait], [0])
+AT_CHECK([ovs-appctl revalidator/wait], [0])
+
+dnl Make sure no more ukeys exists.
+AT_CHECK([ovs-appctl upcall/show | grep '(keys' | awk '{print $3}' | \
+            grep -qv '0)'], [1])
+
+OVS_TRAFFIC_VSWITCHD_STOP(["/failed to flow_del (No such file or directory)/d"])
+AT_CLEANUP
+
 AT_SETUP([offloads - set ingress_policing_rate and ingress_policing_burst - offloads disabled])
 AT_KEYWORDS([ingress_policing])
 OVS_CHECK_TC_QDISC()

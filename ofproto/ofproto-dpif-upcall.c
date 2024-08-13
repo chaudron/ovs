@@ -57,6 +57,7 @@ COVERAGE_DEFINE(dumped_inconsistent_flow);
 COVERAGE_DEFINE(dumped_new_flow);
 COVERAGE_DEFINE(handler_duplicate_upcall);
 COVERAGE_DEFINE(revalidate_missed_dp_flow);
+COVERAGE_DEFINE(revalidate_missing_dp_flow);
 COVERAGE_DEFINE(ukey_dp_change);
 COVERAGE_DEFINE(ukey_invalid_stat_reset);
 COVERAGE_DEFINE(ukey_replace_contention);
@@ -278,6 +279,7 @@ enum flow_del_reason {
     FDR_BAD_ODP_FIT,        /* Bad ODP flow fit. */
     FDR_FLOW_IDLE,          /* Flow idle timeout. */
     FDR_FLOW_LIMIT,         /* Kill all flows condition reached. */
+    FDR_FLOW_MISSING_DP,    /* Flow is missing from the datapath. */
     FDR_FLOW_WILDCARDED,    /* Flow needs a narrower wildcard mask. */
     FDR_NO_OFPROTO,         /* Bridge not found. */
     FDR_PURGE,              /* User requested flow deletion. */
@@ -315,6 +317,7 @@ struct udpif_key {
     struct dpif_flow_stats stats OVS_GUARDED; /* Last known stats.*/
     const char *dp_layer OVS_GUARDED;         /* Last known dp_layer. */
     long long int created OVS_GUARDED;        /* Estimate of creation time. */
+    long long int last_dumped OVS_GUARDED;    /* Flow last dump time. */
     uint64_t dump_seq OVS_GUARDED;            /* Tracks udpif->dump_seq. */
     uint64_t reval_seq OVS_GUARDED;           /* Tracks udpif->reval_seq. */
     enum ukey_state state OVS_GUARDED;        /* Tracks ukey lifetime. */
@@ -1825,6 +1828,7 @@ ukey_create__(const struct nlattr *key, size_t key_len,
     ukey->state_thread = ovsthread_id_self();
     ukey->state_where = OVS_SOURCE_LOCATOR;
     ukey->created = ukey->flow_time = time_msec();
+    ukey->last_dumped = 0;
     memset(&ukey->stats, 0, sizeof ukey->stats);
     ukey->stats.used = used;
     ukey->dp_layer = NULL;
@@ -2456,7 +2460,14 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
         log_unexpected_stats_jump(ukey, stats);
     }
 
-    if (need_revalidate) {
+    if ((ukey->last_dumped ? ukey->last_dumped : ukey->created)
+        < udpif->dpif->current_ms - (2 * ofproto_max_idle)) {
+        /* If the flow was not dumped for at least twice the idle time,
+         * we can assume the datapath flow now longer exists and the ukey
+         * should be deleted. */
+        COVERAGE_INC(revalidate_missing_dp_flow);
+        *del_reason = FDR_FLOW_MISSING_DP;
+    } else if (need_revalidate) {
         if (should_revalidate(udpif, ukey, push.n_packets)) {
             if (!ukey->xcache) {
                 ukey->xcache = xlate_cache_new();
@@ -2890,6 +2901,7 @@ revalidate(struct revalidator *revalidator)
                 continue;
             }
 
+            ukey->last_dumped = now;
             ukey->offloaded = f->attrs.offloaded;
             if (!ukey->dp_layer
                 || (!dpif_synced_dp_layers(udpif->dpif)
