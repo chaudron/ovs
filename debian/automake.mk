@@ -113,6 +113,11 @@ CLEANFILES += debian/control
 debian: debian/copyright debian/control
 .PHONY: debian
 
+if DPDK_NETDEV
+export DEB_BUILD_OPTIONS ?= nocheck parallel=`nproc`
+else
+export DEB_BUILD_OPTIONS ?= nocheck parallel=`nproc` nodpdk
+endif
 
 debian-deb: debian
 	@if test X"$(srcdir)" != X"$(top_builddir)"; then			\
@@ -123,10 +128,5 @@ debian-deb: debian
 	$(update_deb_copyright)
 	$(update_deb_control)
 	$(AM_V_GEN) fakeroot debian/rules clean
-if DPDK_NETDEV
-	$(AM_V_GEN) DEB_BUILD_OPTIONS="nocheck parallel=`nproc`" \
+	$(AM_V_GEN) DEB_BUILD_OPTIONS="${DEB_BUILD_OPTIONS}" \
 		fakeroot debian/rules binary
-else
-	$(AM_V_GEN) DEB_BUILD_OPTIONS="nocheck parallel=`nproc` nodpdk" \
-		fakeroot debian/rules binary
-endif
