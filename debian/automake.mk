@@ -95,10 +95,12 @@ CLEANFILES += debian/copyright
 
 
 if DPDK_NETDEV
+DEB_BUILD_OPTIONS ?= nocheck parallel=`nproc`
 update_deb_control = \
 	$(AM_V_GEN) sed -e 's/^\# DPDK_NETDEV //' \
 		< $(srcdir)/debian/control.in > debian/control
 else
+DEB_BUILD_OPTIONS ?= nocheck parallel=`nproc` nodpdk
 update_deb_control = \
 	$(AM_V_GEN) grep -v '^\# DPDK_NETDEV' \
 		< $(srcdir)/debian/control.in > debian/control
@@ -112,12 +114,6 @@ CLEANFILES += debian/control
 
 debian: debian/copyright debian/control
 .PHONY: debian
-
-if DPDK_NETDEV
-export DEB_BUILD_OPTIONS ?= nocheck parallel=`nproc`
-else
-export DEB_BUILD_OPTIONS ?= nocheck parallel=`nproc` nodpdk
-endif
 
 debian-deb: debian
 	@if test X"$(srcdir)" != X"$(top_builddir)"; then			\
