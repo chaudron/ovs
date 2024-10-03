@@ -330,6 +330,8 @@ NS_CHECK_EXEC([at_ns0], [ping -s 3200 -q -c 3 -i 0.3 -W 2 10.1.1.100 | FORMAT_PI
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
 
+ovs-appctl dpctl/dump-flows
+
 dnl Start ncat listeners.
 OVS_DAEMONIZE([nc -l 10.1.1.100 1234 > tcp_data], [nc.pid])
 NETNS_DAEMONIZE([at_ns0], [nc -l -u 10.1.1.1 4321 > udp_data], [nc2.pid])
