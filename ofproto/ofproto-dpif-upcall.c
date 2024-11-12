@@ -3338,8 +3338,9 @@ static void
 upcall_unixctl_ofproto_detrace(struct unixctl_conn *conn, int argc,
                                const char *argv[], void *aux OVS_UNUSED)
 {
-    unsigned int pmd_id = NON_PMD_CORE_ID;
     const char *key_s = argv[1];
+    const char *pmd_str = NULL;
+    unsigned int pmd_id;
     ovs_u128 ufid;
 
     if (odp_ufid_from_string(key_s, &ufid) <= 0) {
@@ -3348,7 +3349,7 @@ upcall_unixctl_ofproto_detrace(struct unixctl_conn *conn, int argc,
     }
 
     if (argc == 3) {
-        const char *pmd_str = argv[2];
+        pmd_str = argv[2];
         if (!ovs_scan(pmd_str, "pmd=%d", &pmd_id)) {
             unixctl_command_reply_error(conn,
                                         "Invalid pmd argument format. "
@@ -3361,6 +3362,11 @@ upcall_unixctl_ofproto_detrace(struct unixctl_conn *conn, int argc,
     struct udpif *udpif;
 
     LIST_FOR_EACH (udpif, list_node, &all_udpifs) {
+        if (!pmd_str) {
+            const char *type = dpif_normalize_type(dpif_type(udpif->dpif));
+            pmd_id = !strcmp(type, "system") ? PMD_ID_NULL : NON_PMD_CORE_ID;
+        }
+
         struct udpif_key *ukey = ukey_lookup(udpif, &ufid, pmd_id);
         if (!ukey) {
             continue;
