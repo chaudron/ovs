@@ -1773,7 +1773,7 @@ flow_message_log_level(int error)
      * Kernels that support flow wildcarding will reject these flows as
      * duplicates (EEXIST), so lower the log level to debug for these
      * types of messages. */
-    return (error && error != EEXIST) ? VLL_WARN : VLL_DBG;
+    return (error && error != EEXIST) ? VLL_WARN : VLL_INFO;
 }
 
 static bool
@@ -1826,6 +1826,7 @@ log_flow_put_message(const struct dpif *dpif,
 {
     if (should_log_flow_message(module, error)
         && !(put->flags & DPIF_FP_PROBE)) {
+    //if (!(put->flags & DPIF_FP_PROBE)) {
         struct ds s;
 
         ds_init(&s);
@@ -1853,12 +1854,12 @@ log_flow_del_message(const struct dpif *dpif,
                      const struct dpif_flow_del *del,
                      int error)
 {
-    if (should_log_flow_message(module, error)) {
+    //if (should_log_flow_message(module, error)) {
         log_flow_message(dpif, error, module, "flow_del",
                          del->key, del->key_len,
                          NULL, 0, del->ufid, !error ? del->stats : NULL,
                          NULL, 0);
-    }
+    //}
 }
 
 /* Logs that 'execute' was executed on 'dpif' and completed with errno 'error'

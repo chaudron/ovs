@@ -483,6 +483,16 @@ udpif_init(void)
     }
 }
 
+static void ec_dbg(ovs_u128 *ufid, const char *msg)
+{
+    struct ds dss = DS_EMPTY_INITIALIZER;
+
+    odp_format_ufid(ufid, &dss);
+
+    VLOG_INFO("EC_DBG[UFID: %s]: %s", ds_cstr(&dss), msg);
+     ds_destroy(&dss);
+}
+
 struct udpif *
 udpif_create(struct dpif_backer *backer, struct dpif *dpif)
 {
@@ -2292,7 +2302,10 @@ populate_xcache(struct udpif *udpif, struct udpif_key *ukey,
     ovs_assert(!ukey->xcache);
     ukey->xcache = ctx.xcache = xlate_cache_new();
     error = xlate_ukey(udpif, ukey, tcp_flags, &ctx);
+
+    ec_dbg(&ukey->ufid, "Populate xache!");
     if (error) {
+        VLOG_ERR("EC_DBG: Error %d", error);
         return error;
     }
     xlate_out_uninit(&ctx.xout);
@@ -2466,6 +2479,7 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
             } else {
                 xlate_cache_clear(ukey->xcache);
             }
+            ec_dbg(&ukey->ufid, "Cache cleared [revalidate]!");
             result = revalidate_ukey__(udpif, ukey, push.tcp_flags,
                                        odp_actions, recircs, ukey->xcache,
                                        del_reason);
@@ -2477,6 +2491,11 @@ revalidate_ukey(struct udpif *udpif, struct udpif_key *ukey,
                || !populate_xcache(udpif, ukey, push.tcp_flags)) {
         result = UKEY_KEEP;
     }
+
+    VLOG_INFO("EC_DBG: need_revalidate %d, result %d, del_reason %d, xcache %p, pkts %lu, push_pkts %lu",
+              need_revalidate, result,
+              *del_reason, ukey->xcache,
+              stats->n_packets, push.n_packets);
 
     /* Stats for deleted flows will be attributed upon flow deletion. Skip. */
     if (result != UKEY_DELETE) {
@@ -2949,6 +2968,7 @@ revalidate(struct revalidator *revalidator)
                 result = UKEY_DELETE;
                 del_reason = (kill_them_all) ? FDR_FLOW_LIMIT : FDR_FLOW_IDLE;
             } else {
+                ec_dbg(&ukey->ufid, "revalidate_ukey()");
                 result = revalidate_ukey(udpif, ukey, &stats, &odp_actions,
                                          reval_seq, &recircs, &del_reason);
             }
@@ -3362,6 +3382,37 @@ upcall_unixctl_ofproto_detrace(struct unixctl_conn *conn, int argc,
     struct udpif *udpif;
 
     LIST_FOR_EACH (udpif, list_node, &all_udpifs) {
+
+        if (true) {
+            for (int i = 0; i < udpif->n_revalidators; i++) {
+                struct revalidator *revalidator = &udpif->revalidators[i];
+                int j;
+
+                for (j = i; j < N_UMAPS; j += udpif->n_revalidators) {
+
+                    struct udpif_key *ukey;
+                    struct umap *umap = &udpif->ukeys[j];
+
+                    CMAP_FOR_EACH(ukey, cmap_node, &umap->cmap) {
+                        struct ds dss = DS_EMPTY_INITIALIZER;
+
+                        ovs_mutex_lock(&ukey->mutex);
+
+                        odp_format_ufid(&ukey->ufid, &dss);
+
+                        VLOG_INFO("[%d] UFID: %s, cache: %p, state: %d",
+                                  revalidator->id,
+                                  ds_cstr(&dss),
+                                  ukey->xcache, ukey->state);
+
+                        ovs_mutex_unlock(&ukey->mutex);
+
+                        ds_destroy(&dss);
+                    }
+                }
+            }
+        }
+
         if (!pmd_str) {
             const char *type = dpif_normalize_type(dpif_type(udpif->dpif));
             pmd_id = !strcmp(type, "system") ? PMD_ID_NULL : NON_PMD_CORE_ID;
@@ -3381,6 +3432,10 @@ upcall_unixctl_ofproto_detrace(struct unixctl_conn *conn, int argc,
         }
         ovs_mutex_unlock(&ukey->mutex);
     }
+    if (ds.length == 0) {
+        ds_put_cstr(&ds, "The ukey was not found!\n");
+    }
+
     unixctl_command_reply(conn, ds_cstr(&ds));
     ds_destroy(&ds);
 }
