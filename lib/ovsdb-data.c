@@ -1230,7 +1230,7 @@ ovsdb_datum_sort_unique(struct ovsdb_datum *datum,
         }
     }
     datum->n = dst;
-    return datum->n - src;
+    return datum->n > src ? datum->n - src : 0;
 }
 
 /* Checks that each of the atoms in 'datum' conforms to the constraints
