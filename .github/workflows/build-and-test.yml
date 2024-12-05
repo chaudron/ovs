@@ -332,7 +332,7 @@ jobs:
         name: logs-linux-${{ join(matrix.*, '-') }}
         path: logs.tgz
 
-  build-clang-cache:
+  build-clang-analyze-cache:
     needs: build-dpdk
     env:
       dependencies: |
@@ -341,7 +341,7 @@ jobs:
       CC:   clang
       DPDK: dpdk
       CLANG_ANALYZE: true
-    name: clang-cache
+    name: clang-analyze-cache
     outputs:
       key: ${{ steps.cache_key.outputs.key }}
       outcome: ${{ steps.build_base.outcome }}
@@ -446,10 +446,10 @@ jobs:
       run:  ./.ci/linux-build.sh
 
   build-clang-analyze:
-    needs: [build-dpdk, build-clang-cache]
+    needs: [build-dpdk, build-clang-analyze-cache]
     if: >
-        needs.build-clang-cache.outputs.outcome == 'success' ||
-        needs.build-clang-cache.outputs.outcome == 'skipped'
+        needs.build-clang-analyze-cache.outputs.outcome == 'success' ||
+        needs.build-clang-analyze-cache.outputs.outcome == 'skipped'
     env:
       dependencies: |
         automake bc clang-tools libnuma-dev libunbound-dev libunwind-dev \
@@ -474,7 +474,7 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: base-clang-analyzer-results
-        key:  ${{ needs.build-clang-cache.outputs.key }}
+        key:  ${{ needs.build-clang-analyze-cache.outputs.key }}
 
     - name: set up python
       uses: actions/setup-python@v5
