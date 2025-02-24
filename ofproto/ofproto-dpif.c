@@ -6180,25 +6180,30 @@ static void
 ofproto_unixctl_fdb_show_json(const struct ofproto_dpif *ofproto,
                               struct json **fdb_entries)
 {
-    size_t num_entries = hmap_count(&ofproto->ml->table);
     struct json **json_entries = NULL;
     const struct mac_entry *entry;
+    size_t num_entries;
     int i = 0;
 
+    ovs_rwlock_rdlock(&ofproto->ml->rwlock);
+
+    num_entries = hmap_count(&ofproto->ml->table);
     if (!num_entries) {
-        goto done;
+        goto done_unlock;
     }
 
     json_entries = xmalloc(num_entries * sizeof *json_entries);
-    ovs_rwlock_rdlock(&ofproto->ml->rwlock);
+
     LIST_FOR_EACH (entry, lru_node, &ofproto->ml->lrus) {
         struct ofbundle *bundle = mac_entry_get_port(ofproto->ml, entry);
+        struct ofport_dpif *port = ofbundle_get_a_port(bundle);
         struct json *json_entry = json_object_create();
         int age = mac_entry_age(ofproto->ml, entry);
-        long long port;
 
-        port = (OVS_FORCE long long) ofbundle_get_a_port(bundle)->up.ofp_port;
-        json_object_put(json_entry, "port", json_integer_create(port));
+        ovs_assert(i < num_entries);
+        json_object_put(json_entry, "port",
+                        json_integer_create(
+                            (OVS_FORCE long long) port->up.ofp_port));
         json_object_put(json_entry, "vlan", json_integer_create(entry->vlan));
         json_object_put_format(json_entry, "mac", ETH_ADDR_FMT,
                                ETH_ADDR_ARGS(entry->mac));
@@ -6208,13 +6213,9 @@ ofproto_unixctl_fdb_show_json(const struct ofproto_dpif *ofproto,
             json_object_put(json_entry, "age", json_integer_create(age));
         }
         json_entries[i++] = json_entry;
-
-        if (i >= num_entries) {
-            break;
-        }
     }
+done_unlock:
     ovs_rwlock_unlock(&ofproto->ml->rwlock);
-done:
     *fdb_entries = json_array_create(json_entries, i);
 }
 
