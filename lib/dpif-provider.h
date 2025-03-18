@@ -23,12 +23,16 @@
  * ports that they contain may be fixed or dynamic. */
 
 #include "openflow/openflow.h"
+#include "ovs-thread.h"
 #include "dpif.h"
 #include "util.h"
 
 #ifdef  __cplusplus
 extern "C" {
 #endif
+
+/* Forward declarations of private structures. */
+struct dp_offload;
 
 /* Open vSwitch datapath interface.
  *
@@ -40,6 +44,9 @@ struct dpif {
     uint8_t netflow_engine_type;
     uint8_t netflow_engine_id;
     long long int current_ms;
+
+    /* dpif offload provider specific variables. */
+    OVSRCU_TYPE(struct dp_offload *) dp_offload;
 };
 
 struct dpif_ipf_status;
