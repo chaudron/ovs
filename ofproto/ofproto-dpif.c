@@ -25,6 +25,7 @@
 #include "coverage.h"
 #include "cfm.h"
 #include "ct-dpif.h"
+#include "dpif-offload.h"
 #include "fail-open.h"
 #include "guarded-list.h"
 #include "hmapx.h"
@@ -6702,6 +6703,71 @@ done:
     return changed;
 }
 
+static void
+dpif_offload_show_backer_text(const struct dpif_backer *backer, struct ds *ds)
+{
+    struct dpif_offload_dump dump;
+    struct dpif_offload *offload;
+
+    ds_put_format(ds, "%s:\n", dpif_name(backer->dpif));
+
+    DPIF_OFFLOAD_FOR_EACH (offload, &dump, backer->dpif) {
+        ds_put_format(ds, "  %s\n", dpif_offload_class_type(offload));
+    }
+}
+
+static struct json *
+dpif_offload_show_backer_json(struct json *backers,
+                              const struct dpif_backer *backer)
+{
+    struct json *json_backer = json_object_create();
+    struct dpif_offload_dump dump;
+    struct dpif_offload *offload;
+
+    /* Add datapath as new JSON object using its name as key. */
+    json_object_put(backers, dpif_name(backer->dpif), json_backer);
+
+    /* Add provider to "providers" array using its name as key. */
+    struct json *json_providers = json_array_create_empty();
+
+    /* Add offload provides as new JSON objects using its type as key. */
+    DPIF_OFFLOAD_FOR_EACH (offload, &dump, backer->dpif) {
+        json_array_add(json_providers,
+                       json_string_create(dpif_offload_class_type(offload)));
+    }
+
+    json_object_put(json_backer, "providers", json_providers);
+    return json_backer;
+}
+
+
+static void
+ofproto_unixctl_dpif_offload_show(struct unixctl_conn *conn,
+                                  int argc OVS_UNUSED,
+                                  const char *argv[] OVS_UNUSED,
+                                  void *aux OVS_UNUSED) {
+    if (unixctl_command_get_output_format(conn) == UNIXCTL_OUTPUT_FMT_JSON) {
+        struct json *backers = json_object_create();
+        const struct shash_node *backer;
+
+        SHASH_FOR_EACH (backer, &all_dpif_backers) {
+            dpif_offload_show_backer_json(backers, backer->data);
+        }
+        unixctl_command_reply_json(conn, backers);
+    } else {
+        const struct shash_node **backers = shash_sort(&all_dpif_backers);
+        struct ds ds = DS_EMPTY_INITIALIZER;
+
+        for (int i = 0; i < shash_count(&all_dpif_backers); i++) {
+            dpif_offload_show_backer_text(backers[i]->data, &ds);
+        }
+        free(backers);
+
+        unixctl_command_reply(conn, ds_cstr(&ds));
+        ds_destroy(&ds);
+    }
+}
+
 static struct json *
 dpif_show_backer_json(struct json *backers, const struct dpif_backer *backer)
 {
@@ -7059,6 +7125,9 @@ ofproto_unixctl_init(void)
                              ofproto_unixctl_mcast_snooping_show, NULL);
     unixctl_command_register("dpif/dump-dps", "", 0, 0,
                              ofproto_unixctl_dpif_dump_dps, NULL);
+    unixctl_command_register("dpif/offload/show", "", 0, 0,
+                             ofproto_unixctl_dpif_offload_show,
+                             NULL);
     unixctl_command_register("dpif/show", "", 0, 0, ofproto_unixctl_dpif_show,
                              NULL);
     unixctl_command_register("dpif/show-dp-features", "bridge", 1, 1,
