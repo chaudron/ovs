@@ -23,6 +23,7 @@
  * ports that they contain may be fixed or dynamic. */
 
 #include "openflow/openflow.h"
+#include "ovs-thread.h"
 #include "dpif.h"
 #include "util.h"
 
@@ -40,6 +41,14 @@ struct dpif {
     uint8_t netflow_engine_type;
     uint8_t netflow_engine_id;
     long long int current_ms;
+
+    /* dpif offload provider specific variables. */
+    struct ovs_mutex offload_mutex;
+    struct ovs_list offload_providers; /* Note that offload providers will
+                                        * only be added at dpif creation time
+                                        * and removed during destruction.
+                                        * No intermediate additions or
+                                        * deletions are allowed. */
 };
 
 struct dpif_ipf_status;

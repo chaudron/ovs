@@ -927,6 +927,33 @@ int dpif_cache_get_size(struct dpif *dpif, uint32_t level, uint32_t *size);
 int dpif_cache_set_size(struct dpif *dpif, uint32_t level, uint32_t size);
 
 
+/* Offload provider operations. */
+struct dpif_offload;
+
+struct dpif_offload_dump {
+    const struct dpif *dpif;
+    int error;
+    void *state;
+};
+void dpif_offload_dump_start(struct dpif_offload_dump *, const struct dpif *);
+bool dpif_offload_dump_next(struct dpif_offload_dump *,
+                            struct dpif_offload **);
+int dpif_offload_dump_done(struct dpif_offload_dump *);
+
+/* Iterates through each DPIF_OFFLOAD in DPIF, using DUMP as state.
+ *
+ * Arguments all have pointer type.
+ *
+ * If you break out of the loop, then you need to free the dump structure by
+ * hand using dpif_offload_dump_done(). */
+#define DPIF_OFFLOAD_FOR_EACH(DPIF_OFFLOAD, DUMP, DPIF)  \
+    for (dpif_offload_dump_start(DUMP, DPIF);            \
+         (dpif_offload_dump_next(DUMP, &DPIF_OFFLOAD)    \
+          ? true                                         \
+          : (dpif_offload_dump_done(DUMP), false));      \
+        )
+
+
 /* Miscellaneous. */
 
 void dpif_get_netflow_ids(const struct dpif *,
