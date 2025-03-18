@@ -27,6 +27,8 @@
 #include "dp-packet.h"
 #include "dpctl.h"
 #include "dpif-netdev.h"
+#include "dpif-offload.h"
+#include "dpif-offload-provider.h"
 #include "flow.h"
 #include "netdev-offload.h"
 #include "netdev-provider.h"
@@ -125,6 +127,7 @@ dp_initialize(void)
         tnl_port_map_init();
         tnl_neigh_cache_init();
         route_table_init();
+        dp_offload_initialize();
 
         for (i = 0; i < ARRAY_SIZE(base_dpif_classes); i++) {
             dp_register_provider(base_dpif_classes[i]);
@@ -359,6 +362,8 @@ do_open(const char *name, const char *type, bool create, struct dpif **dpifp)
 
         ovs_assert(dpif->dpif_class == registered_class->dpif_class);
 
+        dpif_offload_attach_providers(dpif);
+
         DPIF_PORT_FOR_EACH(&dpif_port, &port_dump, dpif) {
             struct netdev *netdev;
             int err;
@@ -459,6 +464,7 @@ dpif_close(struct dpif *dpif)
         if (rc->refcount == 1) {
             dpif_remove_netdev_ports(dpif);
         }
+        dpif_offload_detach_providers(dpif);
         dpif_uninit(dpif, true);
         dp_class_unref(rc);
     }
@@ -1729,6 +1735,8 @@ dpif_init(struct dpif *dpif, const struct dpif_class *dpif_class,
     dpif->full_name = xasprintf("%s@%s", dpif_class->type, name);
     dpif->netflow_engine_type = netflow_engine_type;
     dpif->netflow_engine_id = netflow_engine_id;
+    ovs_mutex_init(&dpif->offload_mutex);
+    ovs_list_init(&dpif->offload_providers);
 }
 
 /* Undoes the results of initialization.
@@ -2144,4 +2152,68 @@ bool
 dpif_synced_dp_layers(struct dpif *dpif)
 {
     return dpif->dpif_class->synced_dp_layers;
+}
+
+void dpif_offload_dump_start(struct dpif_offload_dump *dump,
+                             const struct dpif *dpif)
+{
+    memset(dump, 0, sizeof *dump);
+    dump->dpif = dpif;
+}
+
+bool dpif_offload_dump_next(struct dpif_offload_dump *dump,
+                            struct dpif_offload **offload)
+{
+    if (!offload || !dump || dump->error) {
+        return false;
+    }
+
+    ovs_mutex_lock(&dump->dpif->offload_mutex);
+
+    if (dump->state) {
+        /* In theory, list entries should not be removed. However, in case
+         * someone calls this during destruction and the node has disappeared,
+         * we will return EIDRM (Identifier removed). */
+        struct dpif_offload *offload_entry = NULL;
+
+        LIST_FOR_EACH (offload_entry, dpif_list_node,
+                       &dump->dpif->offload_providers) {
+            if (offload_entry == dump->state) {
+                if (ovs_list_back(&dump->dpif->offload_providers)
+                    == &offload_entry->dpif_list_node) {
+                        dump->error = EOF;
+                } else {
+                    *offload = CONTAINER_OF(
+                        offload_entry->dpif_list_node.next,
+                        struct dpif_offload, dpif_list_node);
+
+                    dump->state = *offload;
+                }
+                break;
+            }
+        }
+
+        if (!offload_entry) {
+            dump->error = EIDRM;
+        }
+    } else {
+        /* Get the first entry in the list. */
+        if (!ovs_list_is_empty(&dump->dpif->offload_providers)) {
+            *offload = CONTAINER_OF(
+                ovs_list_front(&dump->dpif->offload_providers),
+                struct dpif_offload, dpif_list_node);
+
+            dump->state = *offload;
+        } else {
+            dump->error = EOF;
+        }
+    }
+
+    ovs_mutex_unlock(&dump->dpif->offload_mutex);
+    return !dump->error;
+}
+
+int dpif_offload_dump_done(struct dpif_offload_dump *dump)
+{
+    return dump->error == EOF ? 0 : dump->error;
 }
