@@ -27,6 +27,7 @@
 #include "dp-packet.h"
 #include "dpctl.h"
 #include "dpif-netdev.h"
+#include "dpif-offload.h"
 #include "flow.h"
 #include "netdev-offload.h"
 #include "netdev-provider.h"
@@ -125,6 +126,7 @@ dp_initialize(void)
         tnl_port_map_init();
         tnl_neigh_cache_init();
         route_table_init();
+        dp_offload_initialize();
 
         for (i = 0; i < ARRAY_SIZE(base_dpif_classes); i++) {
             dp_register_provider(base_dpif_classes[i]);
@@ -359,6 +361,8 @@ do_open(const char *name, const char *type, bool create, struct dpif **dpifp)
 
         ovs_assert(dpif->dpif_class == registered_class->dpif_class);
 
+        dpif_offload_attach_providers(dpif);
+
         DPIF_PORT_FOR_EACH(&dpif_port, &port_dump, dpif) {
             struct netdev *netdev;
             int err;
@@ -459,6 +463,7 @@ dpif_close(struct dpif *dpif)
         if (rc->refcount == 1) {
             dpif_remove_netdev_ports(dpif);
         }
+        dpif_offload_detach_providers(dpif);
         dpif_uninit(dpif, true);
         dp_class_unref(rc);
     }
@@ -1729,6 +1734,8 @@ dpif_init(struct dpif *dpif, const struct dpif_class *dpif_class,
     dpif->full_name = xasprintf("%s@%s", dpif_class->type, name);
     dpif->netflow_engine_type = netflow_engine_type;
     dpif->netflow_engine_id = netflow_engine_id;
+    ovs_mutex_init(&dpif->offload_mutex);
+    ovs_list_init(&dpif->offload_providers);
 }
 
 /* Undoes the results of initialization.
@@ -2145,3 +2152,5 @@ dpif_synced_dp_layers(struct dpif *dpif)
 {
     return dpif->dpif_class->synced_dp_layers;
 }
+
+
