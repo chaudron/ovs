@@ -73,6 +73,7 @@ struct dpif_offload_class {
 
 
 extern struct dpif_offload_class dpif_offload_dummy_class;
+extern struct dpif_offload_class dpif_offload_tc_class;
 
 
 /* Global function, called by the dpif layer. */
