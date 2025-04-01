@@ -1187,3 +1187,26 @@ AT_CHECK([ovs-appctl --format json --pretty dpif/offload/show], [0], [dnl
 
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
+
+AT_SETUP([offloads - provider order - offloads enabled])
+AT_KEYWORDS([dpif-offload])
+OVS_TRAFFIC_VSWITCHD_START([], [],
+  [-- set Open_vSwitch . other_config:hw-offload=true \
+   -- set Open_vSwitch . other_config:hw-offload-priority=dummy,tc ])
+
+AT_CHECK([ovs-appctl dpif/offload/show], [0], [dnl
+system@ovs-system:
+  dummy
+  tc
+])
+
+AT_CHECK([ovs-appctl --format json --pretty dpif/offload/show], [0], [dnl
+{
+  "system@ovs-system": {
+    "providers": [[
+      "dummy",
+      "tc"]]}}
+])
+
+OVS_TRAFFIC_VSWITCHD_STOP
+AT_CLEANUP
