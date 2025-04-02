@@ -19,22 +19,65 @@
 #include "dpif-offload.h"
 #include "dpif-offload-provider.h"
 #include "util.h"
+#include "tc.h"
+
+/* dpif offload interface for the tc implementation. */
+struct dpif_offload_tc {
+    struct dpif_offload offload;
+
+    /* Configuration specific variables. */
+    struct ovsthread_once once_enable; /* Track first-time enablement. */
+};
+
+static struct dpif_offload_tc *
+dpif_offload_tc_cast(const struct dpif_offload *offload)
+{
+    dpif_offload_assert_class(offload, &dpif_offload_tc_class);
+    return CONTAINER_OF(offload, struct dpif_offload_tc, offload);
+}
 
 static int
 dpif_offload_tc_open(const struct dpif_offload_class *offload_class,
                      struct dpif *dpif, struct dpif_offload **dpif_offload)
 {
-    struct dpif_offload *offload = xmalloc(sizeof(struct dpif_offload));
+    struct dpif_offload_tc *offload_tc;
 
-    dpif_offload_init(offload, offload_class, dpif);
-    *dpif_offload = offload;
+    offload_tc = xmalloc(sizeof(struct dpif_offload_tc));
+
+    dpif_offload_init(&offload_tc->offload, offload_class, dpif);
+    offload_tc->once_enable = (struct ovsthread_once) \
+                              OVSTHREAD_ONCE_INITIALIZER;
+
+    *dpif_offload = &offload_tc->offload;
     return 0;
 }
 
 static void
 dpif_offload_tc_close(struct dpif_offload *dpif_offload)
 {
-    free(dpif_offload);
+    struct dpif_offload_tc *offload_tc = dpif_offload_tc_cast(dpif_offload);
+
+    free(offload_tc);
+}
+
+static void
+dpif_offload_tc_set_config(struct dpif_offload *offload,
+                           const struct smap *other_cfg)
+{
+    struct dpif_offload_tc *offload_tc = dpif_offload_tc_cast(offload);
+
+    /* We maintain the existing behavior where global configurations
+     * are only accepted when hardware offload is initially enabled.
+     * Once enabled, they cannot be updated or reconfigured. */
+    if (smap_get_bool(other_cfg, "hw-offload", false)) {
+        if (ovsthread_once_start(&offload_tc->once_enable)) {
+
+            tc_set_policy(smap_get_def(other_cfg, "tc-policy",
+                                       TC_POLICY_DEFAULT));
+
+            ovsthread_once_done(&offload_tc->once_enable);
+        }
+    }
 }
 
 struct dpif_offload_class dpif_offload_tc_class = {
@@ -44,4 +87,5 @@ struct dpif_offload_class dpif_offload_tc_class = {
         NULL},
     .open = dpif_offload_tc_open,
     .close = dpif_offload_tc_close,
+    .set_config = dpif_offload_tc_set_config,
 };
