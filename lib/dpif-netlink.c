@@ -34,6 +34,7 @@
 
 #include "bitmap.h"
 #include "dpif-netlink-rtnl.h"
+#include "dpif-offload.h"
 #include "dpif-provider.h"
 #include "fat-rwlock.h"
 #include "flow.h"
@@ -1313,7 +1314,7 @@ dpif_netlink_flow_flush(struct dpif *dpif_)
     flow.cmd = OVS_FLOW_CMD_DEL;
     flow.dp_ifindex = dpif->dp_ifindex;
 
-    if (netdev_is_flow_api_enabled()) {
+    if (dpif_offload_is_offload_enabled()) {
         netdev_ports_flow_flush(dpif_type_str);
     }
 
@@ -2320,7 +2321,8 @@ parse_flow_put(struct dpif_netlink *dpif, struct dpif_flow_put *put)
     } else if (err != EEXIST) {
         struct netdev *oor_netdev = NULL;
         enum vlog_level level;
-        if (err == ENOSPC && netdev_is_offload_rebalance_policy_enabled()) {
+        if (err == ENOSPC
+            && dpif_offload_is_offload_rebalance_policy_enabled()) {
             /*
              * We need to set OOR on the input netdev (i.e, 'dev') for the
              * flow. But if the flow has a tunnel attribute (i.e, decap action,
@@ -2439,12 +2441,14 @@ dpif_netlink_operate(struct dpif *dpif_, struct dpif_op **ops, size_t n_ops,
     int i = 0;
     int err = 0;
 
-    if (offload_type == DPIF_OFFLOAD_ALWAYS && !netdev_is_flow_api_enabled()) {
+    if (offload_type == DPIF_OFFLOAD_ALWAYS
+        && !dpif_offload_is_offload_enabled()) {
         VLOG_DBG("Invalid offload_type: %d", offload_type);
         return;
     }
 
-    if (offload_type != DPIF_OFFLOAD_NEVER && netdev_is_flow_api_enabled()) {
+    if (offload_type != DPIF_OFFLOAD_NEVER
+        && dpif_offload_is_offload_enabled()) {
         while (n_ops > 0) {
             count = 0;
 
@@ -4233,7 +4237,7 @@ dpif_netlink_meter_set(struct dpif *dpif_, ofproto_meter_id meter_id,
     }
 
     err = dpif_netlink_meter_set__(dpif_, meter_id, config);
-    if (!err && netdev_is_flow_api_enabled()) {
+    if (!err && dpif_offload_is_offload_enabled()) {
         meter_offload_set(meter_id, config);
     }
 
@@ -4332,7 +4336,7 @@ dpif_netlink_meter_get(const struct dpif *dpif, ofproto_meter_id meter_id,
 
     err = dpif_netlink_meter_get_stats(dpif, meter_id, stats, max_bands,
                                        OVS_METER_CMD_GET);
-    if (!err && netdev_is_flow_api_enabled()) {
+    if (!err && dpif_offload_is_offload_enabled()) {
         meter_offload_get(meter_id, stats);
     }
 
@@ -4347,7 +4351,7 @@ dpif_netlink_meter_del(struct dpif *dpif, ofproto_meter_id meter_id,
 
     err  = dpif_netlink_meter_get_stats(dpif, meter_id, stats,
                                         max_bands, OVS_METER_CMD_DEL);
-    if (!err && netdev_is_flow_api_enabled()) {
+    if (!err && dpif_offload_is_offload_enabled()) {
         meter_offload_del(meter_id, stats);
     }
 
