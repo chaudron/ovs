@@ -276,6 +276,20 @@ dpif_offload_detach_providers(struct dpif *dpif)
      }
 }
 
+void
+dpif_offload_set_config(struct dpif *dpif, const struct smap *other_cfg)
+{
+    struct dpif_offload *offload;
+
+    ovs_mutex_lock(&dpif->offload_mutex);
+    LIST_FOR_EACH_SAFE (offload, dpif_list_node, &dpif->offload_providers) {
+        if (offload->class->set_config) {
+            offload->class->set_config(offload, other_cfg);
+        }
+    }
+    ovs_mutex_unlock(&dpif->offload_mutex);
+}
+
 
 void
 dpif_offload_init(struct dpif_offload *offload,
@@ -371,6 +385,7 @@ dpif_offload_set_global_cfg(const struct smap *other_cfg)
 
         if (ovsthread_once_start(&once_enable)) {
             atomic_store_relaxed(&dpif_offload_global_enabled, true);
+            VLOG_INFO("hw-offload API Enabled");
 
             if (smap_get_bool(other_cfg, "offload-rebalance", false)) {
                 atomic_store_relaxed(&dpif_offload_rebalance_policy, true);
