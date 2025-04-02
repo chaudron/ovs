@@ -1597,6 +1597,7 @@ dpif_set_config(struct dpif *dpif, const struct smap *cfg)
         if (error) {
             log_operation(dpif, "set_config", error);
         }
+        dpif_offload_set_config(dpif, cfg);
     }
 
     return error;
