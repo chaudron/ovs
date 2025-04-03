@@ -1214,5 +1214,13 @@ AT_CHECK([ovs-appctl --format json --pretty dpif/offload/show], [0], [dnl
       "tc"]]}}
 ])
 
+dnl Make sure the dummy provider is tried before it gets added to tc.
+AT_CHECK([ovs-appctl vlog/set dpif_offload:dbg])
+ADD_NAMESPACES(at_ns0)
+ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
+OVS_WAIT_UNTIL(
+  [grep "netdev ovs-p0 failed can_offload for dpif-offload provider dummy" \
+     ovs-vswitchd.log])
+
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
