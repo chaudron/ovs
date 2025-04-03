@@ -2497,7 +2497,7 @@ netdev_offload_dpdk_init_flow_api(struct netdev *netdev)
         return EOPNOTSUPP;
     }
 
-    if (netdev_dpdk_flow_api_supported(netdev)) {
+    if (netdev_dpdk_flow_api_supported(netdev, false)) {
         ret = offload_data_init(netdev);
     }
 
@@ -2507,7 +2507,7 @@ netdev_offload_dpdk_init_flow_api(struct netdev *netdev)
 static void
 netdev_offload_dpdk_uninit_flow_api(struct netdev *netdev)
 {
-    if (netdev_dpdk_flow_api_supported(netdev)) {
+    if (netdev_dpdk_flow_api_supported(netdev, true)) {
         offload_data_destroy(netdev);
     }
 }
