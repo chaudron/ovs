@@ -39,5 +39,9 @@ const char *dpif_offload_name(const struct dpif_offload *);
 const char *dpif_offload_class_type(const struct dpif_offload *);
 bool dpif_offload_get_debug(const struct dpif_offload *, struct ds *,
                             struct json *);
+void dpif_offload_flow_flush(struct dpif *);
+
+/* Netdev specific function, which can be used in the fast path. */
+int dpif_offload_netdev_flush_flows(struct netdev *);
 
 #endif /* DPIF_OFFLOAD_H */
