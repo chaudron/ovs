@@ -953,6 +953,7 @@ dpif_flow_flush(struct dpif *dpif)
 
     error = dpif->dpif_class->flow_flush(dpif);
     log_operation(dpif, "flow_flush", error);
+    dpif_offload_flow_flush(dpif);
     return error;
 }
 
