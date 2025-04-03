@@ -19,6 +19,7 @@
 
 #include "dpif-offload.h"
 #include "dpif-offload-provider.h"
+#include "netdev-offload-dpdk.h"
 #include "netdev-provider.h"
 #include "netdev-vport.h"
 #include "util.h"
@@ -253,6 +254,13 @@ dpif_offload_rte_can_offload(struct dpif_offload *dpif_offload OVS_UNUSED,
     return netdev_dpdk_flow_api_supported(netdev, true);
 }
 
+static int
+dpif_offload_rte_netdev_flow_flush(const struct dpif_offload *offload
+                                   OVS_UNUSED, struct netdev *netdev)
+{
+    return netdev_offload_dpdk_flow_flush(netdev);
+}
+
 struct dpif_offload_class dpif_offload_rte_flow_class = {
     .type = "rte_flow",
     .supported_dpif_types = (const char *const[]) {
@@ -265,6 +273,7 @@ struct dpif_offload_class dpif_offload_rte_flow_class = {
     .can_offload = dpif_offload_rte_can_offload,
     .port_add = dpif_offload_rte_port_add,
     .port_del = dpif_offload_rte_port_del,
+    .netdev_flow_flush = dpif_offload_rte_netdev_flow_flush,
 };
 
 /* XXX: Temporary functions below, which will be removed once fully
