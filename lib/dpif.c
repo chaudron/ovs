@@ -621,6 +621,8 @@ dpif_port_add(struct dpif *dpif, struct netdev *netdev, odp_port_t *port_nop)
             dpif_port.name = CONST_CAST(char *, netdev_name);
             dpif_port.port_no = port_no;
             netdev_ports_insert(netdev, &dpif_port);
+
+            dpif_offload_port_add(dpif, netdev, port_no);
         }
     } else {
         VLOG_WARN_RL(&error_rl, "%s: failed to add %s as port: %s",
@@ -651,6 +653,8 @@ dpif_port_del(struct dpif *dpif, odp_port_t port_no, bool local_delete)
             log_operation(dpif, "port_del", error);
         }
     }
+
+    dpif_offload_port_del(dpif, port_no);
 
     netdev_ports_remove(port_no, dpif_normalize_type(dpif_type(dpif)));
     return error;
@@ -703,6 +707,7 @@ dpif_port_set_config(struct dpif *dpif, odp_port_t port_no,
         if (error) {
             log_operation(dpif, "port_set_config", error);
         }
+        dpif_offload_port_set_config(dpif, port_no, cfg);
     }
 
     return error;
