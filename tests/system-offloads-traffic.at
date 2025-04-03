@@ -1189,4 +1189,3 @@ AT_CHECK([ovs-appctl --format json --pretty dpif/offload/show], [0], [dnl
 
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
-
