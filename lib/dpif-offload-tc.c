@@ -15,6 +15,7 @@
  */
 
 #include <config.h>
+#include <errno.h>
 
 #include "dpif-offload.h"
 #include "dpif-offload-provider.h"
@@ -30,6 +31,7 @@ VLOG_DEFINE_THIS_MODULE(dpif_offload_tc);
 /* dpif offload interface for the tc implementation. */
 struct dpif_offload_tc {
     struct dpif_offload offload;
+    struct dpif_offload_port_mgr *port_mgr;
 
     /* Configuration specific variables. */
     struct ovsthread_once once_enable; /* Track first-time enablement. */
@@ -43,6 +45,60 @@ dpif_offload_tc_cast(const struct dpif_offload *offload)
 }
 
 static int
+dpif_offload_tc_enable_offload(struct dpif_offload *dpif_offload,
+                               struct dpif_offload_port_mgr_port *port)
+{
+    dpif_offload_set_netdev_offload(port->netdev, dpif_offload);
+    return 0;
+}
+
+static int
+dpif_offload_tc_cleanup_offload(struct dpif_offload *dpif_offload OVS_UNUSED,
+                                struct dpif_offload_port_mgr_port *port)
+{
+    dpif_offload_set_netdev_offload(port->netdev, NULL);
+    return 0;
+}
+
+static int
+dpif_offload_tc_port_add(struct dpif_offload *dpif_offload,
+                         struct netdev *netdev, odp_port_t port_no)
+{
+    struct dpif_offload_tc *offload_tc = dpif_offload_tc_cast(dpif_offload);
+    struct dpif_offload_port_mgr_port *port = xmalloc(sizeof *port);
+
+    if (dpif_offload_port_mgr_add(offload_tc->port_mgr, port, netdev,
+                                  port_no, true)) {
+        if (dpif_offload_is_offload_enabled()) {
+            return dpif_offload_tc_enable_offload(dpif_offload, port);
+        }
+        return 0;
+    }
+
+    free(port);
+    return EEXIST;
+}
+
+static int
+dpif_offload_tc_port_del(struct dpif_offload *dpif_offload,
+                         odp_port_t port_no)
+{
+    struct dpif_offload_tc *offload_tc = dpif_offload_tc_cast(dpif_offload);
+    struct dpif_offload_port_mgr_port *port;
+    int ret = 0;
+
+    port = dpif_offload_port_mgr_remove(offload_tc->port_mgr, port_no, true);
+    if (port) {
+        if (dpif_offload_is_offload_enabled()) {
+            ret = dpif_offload_tc_cleanup_offload(dpif_offload, port);
+        }
+        netdev_close(port->netdev);
+        ovsrcu_postpone(free, port);
+    }
+    return ret;
+}
+
+static int
 dpif_offload_tc_open(const struct dpif_offload_class *offload_class,
                      struct dpif *dpif, struct dpif_offload **dpif_offload)
 {
@@ -51,6 +107,7 @@ dpif_offload_tc_open(const struct dpif_offload_class *offload_class,
     offload_tc = xmalloc(sizeof(struct dpif_offload_tc));
 
     dpif_offload_init(&offload_tc->offload, offload_class, dpif);
+    offload_tc->port_mgr = dpif_offload_port_mgr_init();
     offload_tc->once_enable = (struct ovsthread_once) \
                               OVSTHREAD_ONCE_INITIALIZER;
 
@@ -58,12 +115,34 @@ dpif_offload_tc_open(const struct dpif_offload_class *offload_class,
     return 0;
 }
 
+static bool
+dpif_offload_tc_cleanup_port(struct dpif_offload_port_mgr_port *port,
+                             void *aux)
+{
+    struct dpif_offload *offload = aux;
+
+    dpif_offload_tc_port_del(offload, port->port_no);
+    return false;
+}
+
 static void
 dpif_offload_tc_close(struct dpif_offload *dpif_offload)
 {
     struct dpif_offload_tc *offload_tc = dpif_offload_tc_cast(dpif_offload);
 
+    dpif_offload_port_mgr_traverse_ports(offload_tc->port_mgr,
+                                         dpif_offload_tc_cleanup_port,
+                                         dpif_offload);
+
+    dpif_offload_port_mgr_uninit(offload_tc->port_mgr);
     free(offload_tc);
+}
+
+static bool dpif_offload_tc_late_enable(struct dpif_offload_port_mgr_port *p,
+                                        void *aux)
+{
+    dpif_offload_tc_enable_offload(aux, p);
+    return false;
 }
 
 static void
@@ -80,6 +159,10 @@ dpif_offload_tc_set_config(struct dpif_offload *offload,
 
             tc_set_policy(smap_get_def(other_cfg, "tc-policy",
                                        TC_POLICY_DEFAULT));
+
+            dpif_offload_port_mgr_traverse_ports(offload_tc->port_mgr,
+                                                 dpif_offload_tc_late_enable,
+                                                 offload);
 
             ovsthread_once_done(&offload_tc->once_enable);
         }
@@ -108,4 +191,6 @@ struct dpif_offload_class dpif_offload_tc_class = {
     .close = dpif_offload_tc_close,
     .set_config = dpif_offload_tc_set_config,
     .can_offload = dpif_offload_tc_can_offload,
+    .port_add = dpif_offload_tc_port_add,
+    .port_del = dpif_offload_tc_port_del,
 };
