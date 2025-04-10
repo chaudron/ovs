@@ -141,7 +141,9 @@ dp_offload_initialize(void)
     for (int i = 0; i < ARRAY_SIZE(base_dpif_offload_classes); i++) {
         ovs_assert(base_dpif_offload_classes[i]->open
                    && base_dpif_offload_classes[i]->close
-                   && base_dpif_offload_classes[i]->can_offload);
+                   && base_dpif_offload_classes[i]->can_offload
+                   && base_dpif_offload_classes[i]->port_add
+                   && base_dpif_offload_classes[i]->port_del);
 
         dpif_offload_register_provider(base_dpif_offload_classes[i]);
     }
@@ -349,10 +351,6 @@ void dpif_offload_port_add(struct dpif *dpif, struct netdev *netdev,
 
     ovs_mutex_lock(&dpif->offload_mutex);
     LIST_FOR_EACH (offload, dpif_list_node, &dpif->offload_providers) {
-        if (!offload->class->port_add) {
-            continue;
-        }
-
         if (offload->class->can_offload(offload, netdev)) {
             int err = offload->class->port_add(offload, netdev, port_no);
             if (!err) {
@@ -379,13 +377,7 @@ void dpif_offload_port_del(struct dpif *dpif, odp_port_t port_no) {
 
     ovs_mutex_lock(&dpif->offload_mutex);
     LIST_FOR_EACH (offload, dpif_list_node, &dpif->offload_providers) {
-        int err;
-
-        if (!offload->class->port_del) {
-            continue;
-        }
-
-        err = offload->class->port_del(offload, port_no);
+        int err = offload->class->port_del(offload, port_no);
         if (err) {
             VLOG_ERR("Failed deleting port_no %d from dpif-offload provider "
                      "%s, error %s", port_no, dpif_offload_name(offload),
