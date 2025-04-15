@@ -37,5 +37,7 @@ int dpif_offload_attach_providers(struct dpif *);
 void dpif_offload_detach_providers(struct dpif *);
 const char *dpif_offload_name(const struct dpif_offload *);
 const char *dpif_offload_class_type(const struct dpif_offload *);
+bool dpif_offload_get_debug(const struct dpif_offload *, struct ds *,
+                            struct json *);
 
 #endif /* DPIF_OFFLOAD_H */
