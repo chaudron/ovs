@@ -9812,18 +9812,31 @@ AT_SETUP([ofproto-dpif - offload - ovs-appctl dpif/offload/])
 AT_KEYWORDS([dpif-offload])
 OVS_VSWITCHD_START([add-br br1 -- set bridge br1 datapath-type=dummy])
 
-AT_CHECK([ovs-appctl dpif/offload/show], [0], [dnl
+AT_CHECK([ovs-appctl dpif/offload/show | awk '{if ($1 == "-") print | \
+            "sort"; else print}'], [0], [dnl
 Globally enabled: false
 Datapaths:
 dummy@ovs-dummy:
   dummy
+  - br0: port_no: 100
+  - br1: port_no: 101
+  - ovs-dummy: port_no: 0
 ])
 
 AT_CHECK([ovs-appctl --format json --pretty dpif/offload/show], [0], [dnl
 {
   "dummy@ovs-dummy": {
-    "providers": [[
-      "dummy"]]},
+    "priority": [[
+      "dummy"]],
+    "providers": {
+      "dummy": {
+        "ports": {
+          "br0": {
+            "port_no": 100},
+          "br1": {
+            "port_no": 101},
+          "ovs-dummy": {
+            "port_no": 0}}}}},
   "enabled": false}
 ])
 

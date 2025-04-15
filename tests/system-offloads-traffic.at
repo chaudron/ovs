@@ -1171,21 +1171,37 @@ AT_SETUP([offloads - ovs-appctl dpif/offload/show - offloads enabled])
 AT_KEYWORDS([dpif-offload])
 OVS_TRAFFIC_VSWITCHD_START([], [], [-- set Open_vSwitch . other_config:hw-offload=true])
 
-AT_CHECK([ovs-appctl dpif/offload/show], [0], [dnl
+AT_CHECK([ovs-appctl dpif/offload/show  | awk '{if ($1 == "-") print \
+            | "sort"; else print}' \
+            | sed -E 's/ifindex: [[0-9]]+/ifindex: 0/g'], [0], [dnl
 Globally enabled: true
 Datapaths:
 system@ovs-system:
   tc
+  - br0: port_no: 1, ifindex: 0
+  - ovs-system: port_no: 0, ifindex: 0
   dummy
 ])
 
-AT_CHECK([ovs-appctl --format json --pretty dpif/offload/show], [0], [dnl
+AT_CHECK([ovs-appctl --format json --pretty dpif/offload/show \
+            | sed -E 's/"ifindex": [[0-9]]+/"ifindex": 0/g'], [0], [dnl
 {
   "enabled": true,
   "system@ovs-system": {
-    "providers": [[
+    "priority": [[
       "tc",
-      "dummy"]]}}
+      "dummy"]],
+    "providers": {
+      "dummy": {
+        },
+      "tc": {
+        "ports": {
+          "br0": {
+            "ifindex": 0,
+            "port_no": 1},
+          "ovs-system": {
+            "ifindex": 0,
+            "port_no": 0}}}}}}
 ])
 
 OVS_TRAFFIC_VSWITCHD_STOP
@@ -1197,21 +1213,37 @@ OVS_TRAFFIC_VSWITCHD_START([], [],
   [-- set Open_vSwitch . other_config:hw-offload=true \
    -- set Open_vSwitch . other_config:hw-offload-priority=dummy,tc ])
 
-AT_CHECK([ovs-appctl dpif/offload/show], [0], [dnl
+AT_CHECK([ovs-appctl dpif/offload/show | awk '{if ($1 == "-") print \
+            | "sort"; else print}' \
+            | sed -E 's/ifindex: [[0-9]]+/ifindex: 0/g'], [0], [dnl
 Globally enabled: true
 Datapaths:
 system@ovs-system:
   dummy
   tc
+  - br0: port_no: 1, ifindex: 0
+  - ovs-system: port_no: 0, ifindex: 0
 ])
 
-AT_CHECK([ovs-appctl --format json --pretty dpif/offload/show], [0], [dnl
+AT_CHECK([ovs-appctl --format json --pretty dpif/offload/show \
+            | sed -E 's/"ifindex": [[0-9]]+/"ifindex": 0/g'], [0], [dnl
 {
   "enabled": true,
   "system@ovs-system": {
-    "providers": [[
+    "priority": [[
       "dummy",
-      "tc"]]}}
+      "tc"]],
+    "providers": {
+      "dummy": {
+        },
+      "tc": {
+        "ports": {
+          "br0": {
+            "ifindex": 0,
+            "port_no": 1},
+          "ovs-system": {
+            "ifindex": 0,
+            "port_no": 0}}}}}}
 ])
 
 dnl Make sure the dummy provider is tried before it gets added to tc.
@@ -1221,6 +1253,30 @@ ADD_VETH(p0, at_ns0, br0, "10.1.1.1/24")
 OVS_WAIT_UNTIL(
   [grep "netdev ovs-p0 failed can_offload for dpif-offload provider dummy" \
      ovs-vswitchd.log])
+
+AT_CHECK([ovs-appctl --format json --pretty dpif/offload/show \
+            | sed -E 's/"ifindex": [[0-9]]+/"ifindex": 0/g'], [0], [dnl
+{
+  "enabled": true,
+  "system@ovs-system": {
+    "priority": [[
+      "dummy",
+      "tc"]],
+    "providers": {
+      "dummy": {
+        },
+      "tc": {
+        "ports": {
+          "br0": {
+            "ifindex": 0,
+            "port_no": 1},
+          "ovs-p0": {
+            "ifindex": 0,
+            "port_no": 2},
+          "ovs-system": {
+            "ifindex": 0,
+            "port_no": 0}}}}}}
+])
 
 OVS_TRAFFIC_VSWITCHD_STOP
 AT_CLEANUP
