@@ -396,6 +396,17 @@ dpif_offload_class_type(const struct dpif_offload *offload)
     return offload->class->type;
 }
 
+bool dpif_offload_get_debug(const struct dpif_offload *offload,
+                            struct ds *ds, struct json *json)
+{
+    if (!offload->class->get_debug) {
+        return false;
+    }
+
+    offload->class->get_debug(offload, ds, json);
+    return true;
+}
+
 bool
 dpif_offload_is_offload_enabled(void)
 {

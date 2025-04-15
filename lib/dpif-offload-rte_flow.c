@@ -23,6 +23,7 @@
 #include "netdev-vport.h"
 #include "util.h"
 
+#include "openvswitch/json.h"
 #include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(dpif_offload_rte_flow);
@@ -188,6 +189,57 @@ dpif_offload_rte_set_config(struct dpif_offload *offload,
 }
 
 static bool
+dpif_offload_rte_get_port_debug_ds(struct dpif_offload_port_mgr_port *port,
+                                   void *aux)
+{
+    struct ds *ds = aux;
+
+    ds_put_format(ds, "  - %s: port_no: %u\n",
+                  netdev_get_name(port->netdev), port->port_no);
+
+    return false;
+}
+
+static bool
+dpif_offload_rte_get_port_debug_json(struct dpif_offload_port_mgr_port *port,
+                                     void *aux)
+{
+    struct json *json_port = json_object_create();
+    struct json *json = aux;
+
+    json_object_put(json_port, "port_no",
+                    json_integer_create(odp_to_u32(port->port_no)));
+
+    json_object_put(json, netdev_get_name(port->netdev), json_port);
+    return false;
+}
+
+static void
+dpif_offload_rte_get_debug(const struct dpif_offload *offload, struct ds *ds,
+                           struct json *json)
+{
+    struct dpif_offload_rte_flow *offload_rte = dpif_offload_rte_cast(offload);
+
+    if (json) {
+        struct json *json_ports = json_object_create();
+
+        dpif_offload_port_mgr_traverse_ports(
+            offload_rte->port_mgr, dpif_offload_rte_get_port_debug_json,
+            json_ports);
+
+        if (!json_object_is_empty(json_ports)) {
+            json_object_put(json, "ports", json_ports);
+        } else {
+            json_destroy(json_ports);
+        }
+
+    } else if (ds) {
+        dpif_offload_port_mgr_traverse_ports(
+            offload_rte->port_mgr, dpif_offload_rte_get_port_debug_ds, ds);
+    }
+}
+
+static bool
 dpif_offload_rte_can_offload(struct dpif_offload *dpif_offload OVS_UNUSED,
                              struct netdev *netdev)
 {
@@ -209,6 +261,7 @@ struct dpif_offload_class dpif_offload_rte_flow_class = {
     .open = dpif_offload_rte_open,
     .close = dpif_offload_rte_close,
     .set_config = dpif_offload_rte_set_config,
+    .get_debug = dpif_offload_rte_get_debug,
     .can_offload = dpif_offload_rte_can_offload,
     .port_add = dpif_offload_rte_port_add,
     .port_del = dpif_offload_rte_port_del,
