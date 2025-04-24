@@ -31,6 +31,8 @@
 
 VLOG_DEFINE_THIS_MODULE(dpif_offload);
 
+static struct vlog_rate_limit rl_dbg = VLOG_RATE_LIMIT_INIT(1, 5);
+
 static struct ovs_mutex dpif_offload_mutex = OVS_MUTEX_INITIALIZER;
 static struct shash dpif_offload_classes \
     OVS_GUARDED_BY(dpif_offload_mutex) = \
@@ -719,6 +721,81 @@ dpif_offload_flow_flush(struct dpif *dpif)
                 VLOG_ERR("Failed flow flush on dpif-offload provider "
                     "%s, error %s", dpif_offload_name(offload),
                     ovs_strerror(err));
+            }
+        }
+    }
+}
+
+void
+dpif_offload_meter_set(const struct dpif *dpif, ofproto_meter_id meter_id,
+                       struct ofputil_meter_config *config)
+{
+    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
+    const struct dpif_offload *offload;
+
+    if (!dp_offload) {
+        return;
+    }
+
+    LIST_FOR_EACH (offload, dpif_list_node, &dp_offload->offload_providers) {
+        if (offload->class->meter_set) {
+            int err = offload->class->meter_set(offload, meter_id, config);
+            if (err) {
+                /* Offload APIs could fail, for example, because the offload
+                 * is not supported. This is fine, as the offload API should
+                 * take care of this. */
+                VLOG_DBG_RL(&rl_dbg,
+                            "Failed setting meter %u on dpif-offload provider"
+                            " %s, error %s", meter_id.uint32,
+                            dpif_offload_name(offload), ovs_strerror(err));
+            }
+        }
+    }
+}
+
+void
+dpif_offload_meter_get(const struct dpif *dpif, ofproto_meter_id meter_id,
+                       struct ofputil_meter_stats *stats)
+{
+    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
+    const struct dpif_offload *offload;
+
+    if (!dp_offload) {
+        return;
+    }
+
+    LIST_FOR_EACH (offload, dpif_list_node, &dp_offload->offload_providers) {
+        if (offload->class->meter_get) {
+            int err = offload->class->meter_get(offload, meter_id, stats);
+            if (err) {
+                VLOG_DBG_RL(&rl_dbg,
+                            "Failed getting meter %u on dpif-offload provider"
+                            " %s, error %s", meter_id.uint32,
+                            dpif_offload_name(offload), ovs_strerror(err));
+            }
+        }
+    }
+}
+
+void
+dpif_offload_meter_del(const struct dpif *dpif, ofproto_meter_id meter_id,
+                       struct ofputil_meter_stats *stats)
+{
+    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
+    const struct dpif_offload *offload;
+
+    if (!dp_offload) {
+        return;
+    }
+
+    LIST_FOR_EACH (offload, dpif_list_node, &dp_offload->offload_providers) {
+        if (offload->class->meter_del) {
+            int err = offload->class->meter_del(offload, meter_id, stats);
+            if (err) {
+                VLOG_DBG_RL(&rl_dbg,
+                            "Failed deleting meter %u on dpif-offload provider"
+                            " %s, error %s", meter_id.uint32,
+                            dpif_offload_name(offload), ovs_strerror(err));
             }
         }
     }
