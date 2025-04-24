@@ -2022,6 +2022,7 @@ dpif_meter_set(struct dpif *dpif, ofproto_meter_id meter_id,
     if (!error) {
         VLOG_DBG_RL(&dpmsg_rl, "%s: DPIF meter %"PRIu32" set",
                     dpif_name(dpif), meter_id.uint32);
+        dpif_offload_meter_set(dpif, meter_id, config);
     } else {
         VLOG_WARN_RL(&error_rl, "%s: failed to set DPIF meter %"PRIu32": %s",
                      dpif_name(dpif), meter_id.uint32, ovs_strerror(error));
@@ -2041,6 +2042,7 @@ dpif_meter_get(const struct dpif *dpif, ofproto_meter_id meter_id,
     if (!error) {
         VLOG_DBG_RL(&dpmsg_rl, "%s: DPIF meter %"PRIu32" get stats",
                     dpif_name(dpif), meter_id.uint32);
+        dpif_offload_meter_get(dpif, meter_id, stats);
     } else {
         VLOG_WARN_RL(&error_rl,
                      "%s: failed to get DPIF meter %"PRIu32" stats: %s",
@@ -2064,6 +2066,7 @@ dpif_meter_del(struct dpif *dpif, ofproto_meter_id meter_id,
     if (!error) {
         VLOG_DBG_RL(&dpmsg_rl, "%s: DPIF meter %"PRIu32" deleted",
                     dpif_name(dpif), meter_id.uint32);
+        dpif_offload_meter_del(dpif, meter_id, stats);
     } else {
         VLOG_WARN_RL(&error_rl,
                      "%s: failed to delete DPIF meter %"PRIu32": %s",
