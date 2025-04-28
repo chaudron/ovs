@@ -40,6 +40,7 @@ const char *dpif_offload_class_type(const struct dpif_offload *);
 bool dpif_offload_get_debug(const struct dpif_offload *, struct ds *,
                             struct json *);
 void dpif_offload_flow_flush(struct dpif *);
+uint64_t dpif_offload_flow_get_n_offloaded(const struct dpif *);
 void dpif_offload_meter_set(const struct dpif *dpif, ofproto_meter_id meter_id,
                             struct ofputil_meter_config *config);
 void dpif_offload_meter_get(const struct dpif *dpif, ofproto_meter_id meter_id,
