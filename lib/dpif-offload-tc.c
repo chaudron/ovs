@@ -292,6 +292,7 @@ struct dpif_offload_class dpif_offload_tc_class = {
     .port_add = dpif_offload_tc_port_add,
     .port_del = dpif_offload_tc_port_del,
     .flow_flush = dpif_offload_tc_flow_flush,
+    .flow_get_n_offloaded = dpif_offload_tc_flow_get_n_offloaded,
     .meter_set = dpif_offload_tc_meter_set,
     .meter_get = dpif_offload_tc_meter_get,
     .meter_del = dpif_offload_tc_meter_del,
