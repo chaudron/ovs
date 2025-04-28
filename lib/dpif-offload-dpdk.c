@@ -253,6 +253,32 @@ dpif_offload_dpdk_can_offload(struct dpif_offload *offload OVS_UNUSED,
     return netdev_dpdk_flow_api_supported(netdev, true);
 }
 
+static bool
+dpif_offload_dpdk_get_n_offloaded_cb(
+    struct dpif_offload_port_mgr_port *port, void *aux)
+{
+    uint64_t *total = aux;
+
+    *total += netdev_offload_dpdk_flow_get_n_offloaded(port->netdev);
+    return false;
+}
+
+static uint64_t
+dpif_offload_dpdk_get_n_offloaded(const struct dpif_offload *offload_)
+{
+    struct dpif_offload_dpdk *offload = dpif_offload_dpdk_cast(offload_);
+    uint64_t total = 0;
+
+    if (!dpif_offload_is_offload_enabled()) {
+        return 0;
+    }
+
+    dpif_offload_port_mgr_traverse_ports(
+        offload->port_mgr, dpif_offload_dpdk_get_n_offloaded_cb, &total);
+
+    return total;
+}
+
 static int
 dpif_offload_dpdk_netdev_flow_flush(const struct dpif_offload *offload
                                     OVS_UNUSED, struct netdev *netdev)
@@ -272,6 +298,7 @@ struct dpif_offload_class dpif_offload_dpdk_class = {
     .can_offload = dpif_offload_dpdk_can_offload,
     .port_add = dpif_offload_dpdk_port_add,
     .port_del = dpif_offload_dpdk_port_del,
+    .flow_get_n_offloaded = dpif_offload_dpdk_get_n_offloaded,
     .netdev_flow_flush = dpif_offload_dpdk_netdev_flow_flush,
 };
 
