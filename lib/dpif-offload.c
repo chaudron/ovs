@@ -734,6 +734,28 @@ dpif_offload_flow_flush(struct dpif *dpif)
     ovs_mutex_unlock(&dp_offload->offload_mutex);
 }
 
+uint64_t
+dpif_offload_flow_get_n_offloaded(const struct dpif *dpif)
+{
+    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
+    const struct dpif_offload *offload;
+    uint64_t flow_count = 0;
+
+    if (!dp_offload || !dpif_offload_is_offload_enabled()) {
+        return 0;
+    }
+
+    ovs_mutex_lock(&dp_offload->offload_mutex);
+    LIST_FOR_EACH (offload, dpif_list_node, &dp_offload->offload_providers) {
+        if (offload->class->flow_get_n_offloaded) {
+            flow_count += offload->class->flow_get_n_offloaded(offload);
+        }
+    }
+    ovs_mutex_unlock(&dp_offload->offload_mutex);
+
+    return flow_count;
+}
+
 void
 dpif_offload_meter_set(const struct dpif *dpif, ofproto_meter_id meter_id,
                        struct ofputil_meter_config *config)
