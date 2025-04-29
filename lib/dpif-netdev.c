@@ -8426,7 +8426,8 @@ dp_netdev_hw_flow(const struct dp_netdev_pmd_thread *pmd,
     atomic_read_relaxed(&rxq->port->netdev->hw_info.miss_api_supported,
                         &miss_api_supported);
     if (miss_api_supported) {
-        int err = netdev_hw_miss_packet_recover(rxq->port->netdev, packet);
+        int err = dpif_offload_netdev_hw_miss_packet_recover(rxq->port->netdev,
+                                                             packet);
         if (err && err != EOPNOTSUPP) {
             COVERAGE_INC(datapath_drop_hw_miss_recover);
             return -1;
