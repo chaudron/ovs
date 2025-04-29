@@ -835,6 +835,41 @@ dpif_offload_netdev_flush_flows(struct netdev *netdev)
     return EOPNOTSUPP;
 }
 
+int
+dpif_offload_netdev_hw_miss_packet_postprocess(struct netdev *netdev,
+                                               struct dp_packet *packet)
+{
+    const struct dpif_offload *offload;
+    bool postprocess_api_supported;
+    int rc;
+
+    atomic_read_relaxed(&netdev->hw_info.postprocess_api_supported,
+                        &postprocess_api_supported);
+    if (!postprocess_api_supported) {
+        return EOPNOTSUPP;
+    }
+
+    offload = ovsrcu_get(const struct dpif_offload *, &netdev->dpif_offload);
+
+    if (!offload || !offload->class->netdev_hw_miss_packet_postprocess) {
+        if (offload) {
+            /* Offload is configured and API unsupported by the port;
+             * avoid subsequent calls. */
+            atomic_store_relaxed(&netdev->hw_info.postprocess_api_supported,
+                                 false);
+        }
+        return EOPNOTSUPP;
+    }
+
+    rc = offload->class->netdev_hw_miss_packet_postprocess(offload, netdev,
+                                                           packet);
+    if (rc == EOPNOTSUPP) {
+        /* API unsupported by the port; avoid subsequent calls. */
+        atomic_store_relaxed(&netdev->hw_info.postprocess_api_supported, false);
+    }
+    return rc;
+}
+
 
 struct dpif_offload_port_mgr *
 dpif_offload_port_mgr_init(void)
