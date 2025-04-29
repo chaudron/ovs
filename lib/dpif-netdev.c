@@ -122,7 +122,7 @@ COVERAGE_DEFINE(datapath_drop_invalid_bond);
 COVERAGE_DEFINE(datapath_drop_invalid_tnl_port);
 COVERAGE_DEFINE(datapath_drop_rx_invalid_packet);
 #ifdef ALLOW_EXPERIMENTAL_API /* Packet restoration API required. */
-COVERAGE_DEFINE(datapath_drop_hw_miss_recover);
+COVERAGE_DEFINE(datapath_drop_hw_miss_postprocess);
 #endif
 
 /* Protects against changes to 'dp_netdevs'. */
@@ -8421,14 +8421,18 @@ dp_netdev_hw_flow(const struct dp_netdev_pmd_thread *pmd,
 #ifdef ALLOW_EXPERIMENTAL_API /* Packet restoration API required. */
     /* Restore the packet if HW processing was terminated before completion. */
     struct dp_netdev_rxq *rxq = pmd->ctx.last_rxq;
-    bool miss_api_supported;
+    bool postprocess_api_supported;
 
-    atomic_read_relaxed(&rxq->port->netdev->hw_info.miss_api_supported,
-                        &miss_api_supported);
-    if (miss_api_supported) {
-        int err = netdev_hw_miss_packet_recover(rxq->port->netdev, packet);
+    atomic_read_relaxed(&rxq->port->netdev->hw_info.postprocess_api_supported,
+                        &postprocess_api_supported);
+    if (postprocess_api_supported) {
+        int err = dpif_offload_netdev_hw_miss_packet_postprocess(
+            rxq->port->netdev, packet);
+
         if (err && err != EOPNOTSUPP) {
-            COVERAGE_INC(datapath_drop_hw_miss_recover);
+            if (err != ECANCELED) {
+                COVERAGE_INC(datapath_drop_hw_miss_postprocess);
+            }
             return -1;
         }
     }
