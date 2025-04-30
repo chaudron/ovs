@@ -1110,7 +1110,15 @@ int
 dpif_flow_dump_destroy(struct dpif_flow_dump *dump)
 {
     const struct dpif *dpif = dump->dpif;
-    int error = dpif->dpif_class->flow_dump_destroy(dump);
+    int error;
+    int offload_error;
+
+    offload_error = dpif_offload_flow_dump_destroy(dump);
+    error = dpif->dpif_class->flow_dump_destroy(dump);
+
+    if (!error || error == EOF) {
+        error = offload_error;
+    }
     log_operation(dpif, "flow_dump_destroy", error);
     return error == EOF ? 0 : error;
 }
@@ -1126,7 +1134,8 @@ dpif_flow_dump_thread_create(struct dpif_flow_dump *dump)
 void
 dpif_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread)
 {
-    thread->dpif->dpif_class->flow_dump_thread_destroy(thread);
+    dpif_offload_flow_dump_thread_destroy(thread);
+    thread->dump->dpif->dpif_class->flow_dump_thread_destroy(thread);
 }
 
 /* Attempts to retrieve up to 'max_flows' more flows from 'thread'.  Returns 0
@@ -1151,11 +1160,18 @@ int
 dpif_flow_dump_next(struct dpif_flow_dump_thread *thread,
                     struct dpif_flow *flows, int max_flows)
 {
-    struct dpif *dpif = thread->dpif;
-    int n;
+    struct dpif *dpif = thread->dump->dpif;
+    int n = 0;
 
     ovs_assert(max_flows > 0);
-    n = dpif->dpif_class->flow_dump_next(thread, flows, max_flows);
+
+    if (!thread->offload_dump_done) {
+        n = dpif_offload_flow_dump_next(thread, flows, max_flows);
+    }
+    if (n == 0) {
+        n = dpif->dpif_class->flow_dump_next(thread, flows, max_flows);
+    }
+
     if (n > 0) {
         struct dpif_flow *f;
 
