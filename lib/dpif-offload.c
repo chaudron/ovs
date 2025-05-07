@@ -1227,3 +1227,9 @@ dpif_offload_port_mgr_traverse_ports(
         }
     }
 }
+
+size_t
+dpif_offload_port_mgr_port_count(struct dpif_offload_port_mgr *mgr)
+{
+    return cmap_count(&mgr->odp_port_to_port);
+}
