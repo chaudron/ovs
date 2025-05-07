@@ -586,7 +586,7 @@ netdev_offload_tc_flow_flush(struct netdev *netdev)
     return 0;
 }
 
-static int
+int
 netdev_tc_flow_dump_create(struct netdev *netdev,
                            struct netdev_flow_dump **dump_out,
                            bool terse)
@@ -618,8 +618,7 @@ netdev_tc_flow_dump_create(struct netdev *netdev,
 
     return 0;
 }
-
-static int
+int
 netdev_tc_flow_dump_destroy(struct netdev_flow_dump *dump)
 {
     nl_dump_done(dump->nl_dump);
@@ -1351,7 +1350,7 @@ parse_tc_flower_to_match(const struct netdev *netdev,
     return 0;
 }
 
-static bool
+bool
 netdev_tc_flow_dump_next(struct netdev_flow_dump *dump,
                          struct match *match,
                          struct nlattr **actions,
