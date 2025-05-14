@@ -182,6 +182,18 @@ struct dpif_offload_class {
     void (*flow_dump_thread_destroy)(
         struct dpif_offload_flow_dump_thread *);
 
+    /* Executes each of the 'n_ops' operations in 'ops' on 'dpif_offload', in
+     * the order in which they are specified, placing each operation's results
+     * in the "output" members documented in comments and the 'error' member of
+     * each dpif_op.
+     *
+     * Note that the flow related interface, FLOW_PUT/FLOW_DELETE/FLOW_GET, is
+     * intended for use only when there is a clear separation between
+     * traditional dpif flows and offloaded flows handled by an offload
+     * mechanism. */
+    void (*operate)(const struct dpif_offload *, struct dpif_op **,
+                    size_t n_ops);
+
     /* Returns the number of flows offloaded by the offload provider. */
     uint64_t (*flow_get_n_offloaded)(const struct dpif_offload *);
 
@@ -293,6 +305,7 @@ int dpif_offload_flow_dump_next(struct dpif_flow_dump_thread *,
 void dpif_offload_flow_dump_thread_create(struct dpif_flow_dump_thread *,
                                           struct dpif_flow_dump *);
 void dpif_offload_flow_dump_thread_destroy(struct dpif_flow_dump_thread *);
+bool dpif_offload_operate(struct dpif *, struct dpif_op **, size_t n_ops);
 
 static inline void dpif_offload_assert_class(
     const struct dpif_offload *dpif_offload,
