@@ -1195,6 +1195,31 @@ dpif_offload_netdev_hw_miss_packet_recover(struct netdev *netdev,
     return rc;
 }
 
+bool
+dpif_offload_operate(struct dpif *dpif, struct dpif_op **ops, size_t n_ops)
+{
+    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
+    const struct dpif_offload *offload;
+    bool processed = false;
+
+    if (!dp_offload) {
+        return 0;
+    }
+
+    ovs_mutex_lock(&dp_offload->offload_mutex);
+    LIST_FOR_EACH (offload, dpif_list_node, &dp_offload->offload_providers) {
+        if (offload->class->operate) {
+            offload->class->operate(offload, ops, n_ops);
+
+            //XXX: Implement the code, i.e. if processed we do not need to
+            //     call the same ops on the next provider. How to handle this?
+            processed = true;
+        }
+    }
+    ovs_mutex_unlock(&dp_offload->offload_mutex);
+    return processed;
+}
+
 
 struct dpif_offload_port_mgr *
 dpif_offload_port_mgr_init(void)
