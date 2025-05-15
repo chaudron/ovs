@@ -59,7 +59,7 @@
 #include "mov-avg.h"
 #include "mpsc-queue.h"
 #include "netdev.h"
-#include "netdev-offload.h"
+#include "netdev-offload-dpdk.h"
 #include "netdev-provider.h"
 #include "netdev-vport.h"
 #include "netlink.h"
@@ -2660,7 +2660,7 @@ mark_to_flow_disassociate(struct dp_netdev *dp,
             /* Taking a global 'port_rwlock' to fulfill thread safety
              * restrictions regarding netdev port mapping. */
             ovs_rwlock_rdlock(&dp->port_rwlock);
-            ret = netdev_flow_del(port, &flow->mega_ufid, NULL);
+            ret = netdev_offload_dpdk_flow_del(port, &flow->mega_ufid, NULL);
             ovs_rwlock_unlock(&dp->port_rwlock);
             netdev_close(port);
         }
@@ -2850,10 +2850,9 @@ dp_netdev_flow_offload_put(struct dp_offload_thread_item *item)
     /* Taking a global 'port_rwlock' to fulfill thread safety
      * restrictions regarding the netdev port mapping. */
     ovs_rwlock_rdlock(&dp->port_rwlock);
-    ret = netdev_flow_put(port, &offload->match,
-                          CONST_CAST(struct nlattr *, offload->actions),
-                          offload->actions_len, &flow->mega_ufid, &info,
-                          NULL);
+    ret = netdev_offload_dpdk_flow_put(
+        port, &offload->match, CONST_CAST(struct nlattr *, offload->actions),
+        offload->actions_len, &flow->mega_ufid, &info, NULL);
     ovs_rwlock_unlock(&dp->port_rwlock);
     netdev_close(port);
 
@@ -3723,8 +3722,9 @@ dpif_netdev_get_flow_offload_status(const struct dp_netdev *dp,
      *      This workaround might make statistics less accurate. Especially
      *      for flow deletion case, since there will be no other attempt.  */
     if (!ovs_rwlock_tryrdlock(&dp->port_rwlock)) {
-        ret = netdev_flow_get(netdev, &match, &actions,
-                              &netdev_flow->mega_ufid, stats, attrs, &buf);
+        ret = netdev_offload_dpdk_flow_get(netdev, &match, &actions,
+                                           &netdev_flow->mega_ufid, stats,
+                                           attrs, &buf);
         /* Storing statistics and attributes from the last request for
          * later use on mutex contention. */
         dp_netdev_flow_set_last_stats_attrs(netdev_flow, stats, attrs, ret);
