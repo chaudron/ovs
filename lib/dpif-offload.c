@@ -1296,6 +1296,18 @@ dpif_offload_operate(struct dpif *dpif, struct dpif_op **ops, size_t n_ops,
 }
 
 
+bool
+dpif_offload_netdev_same_offload(const struct netdev *a,
+                                 const struct netdev *b)
+{
+    const struct dpif_offload *offload_a, *offload_b;
+
+    offload_a = ovsrcu_get(const struct dpif_offload *, &a->dpif_offload);
+    offload_b = ovsrcu_get(const struct dpif_offload *, &b->dpif_offload);
+
+    return offload_a == offload_b;
+}
+
 int
 dpif_offload_netdev_flush_flows(struct netdev *netdev)
 {
@@ -1588,4 +1600,58 @@ dpif_offload_port_mgr_port_dump_done(
     netdev_close(state->last_netdev);
     free(state);
     return 0;
+}
+
+/* XXX: Temporary functions below, which will be removed once fully
+ *      refactored. */
+struct netdev *dpif_netdev_offload_get_netdev_by_port_id(odp_port_t);
+void dpif_netdev_offload_ports_traverse(
+    bool (*cb)(struct netdev *, odp_port_t, void *), void *aux);
+
+struct netdev *
+dpif_netdev_offload_get_netdev_by_port_id(odp_port_t port_no)
+{
+    struct dp_offload *dp_offload;
+    struct dpif dpif;
+
+    ovs_mutex_lock(&dpif_offload_mutex);
+    dp_offload = shash_find_data(&dpif_offload_providers, "netdev@ovs-netdev");
+    ovs_mutex_unlock(&dpif_offload_mutex);
+
+    if (!dp_offload) {
+        return NULL;
+    }
+
+    memset(&dpif, 0, sizeof dpif);
+    ovsrcu_set(&dpif.dp_offload, dp_offload);
+
+    return dpif_offload_get_netdev_by_port_id(&dpif, NULL, port_no);
+}
+
+void
+dpif_netdev_offload_ports_traverse(
+    bool (*cb)(struct netdev *, odp_port_t, void *), void *aux)
+{
+    struct dpif_offload_port_dump dump;
+    struct dp_offload *dp_offload;
+    struct dpif_offload_port port;
+    struct dpif dpif;
+
+    ovs_mutex_lock(&dpif_offload_mutex);
+    dp_offload = shash_find_data(&dpif_offload_providers, "netdev@ovs-netdev");
+    ovs_mutex_unlock(&dpif_offload_mutex);
+
+    if (!dp_offload) {
+        return;
+    }
+
+    memset(&dpif, 0, sizeof dpif);
+    ovsrcu_set(&dpif.dp_offload, dp_offload);
+
+    DPIF_OFFLOAD_PORT_FOR_EACH (&port, &dump, &dpif) {
+        if (cb(port.netdev, port.port_no, aux)) {
+            dpif_offload_port_dump_done(&dump);
+            break;
+        }
+    }
 }
