@@ -54,7 +54,10 @@ static int
 dpif_offload_rte_enable_offload(struct dpif_offload *dpif_offload,
                                 struct dpif_offload_port_mgr_port *port)
 {
-    dpif_offload_set_netdev_offload(port->netdev, dpif_offload);
+    struct netdev *netdev = port->netdev;
+
+    netdev_offload_dpdk_init(netdev);
+    dpif_offload_set_netdev_offload(netdev, dpif_offload);
     return 0;
 }
 
@@ -62,6 +65,9 @@ static int
 dpif_offload_rte_cleanup_offload(struct dpif_offload *dpif_offload OVS_UNUSED,
                                  struct dpif_offload_port_mgr_port *port)
 {
+    struct netdev *netdev = port->netdev;
+
+    netdev_offload_dpdk_uninit(netdev);
     dpif_offload_set_netdev_offload(port->netdev, NULL);
     return 0;
 }
