@@ -54,6 +54,8 @@ struct netdev *dpif_offload_offload_get_netdev_by_port_id(
     struct dpif_offload *, odp_port_t);
 
 /* Netdev specific function, which can be used in the fast path. */
+bool dpif_offload_netdev_same_offload(const struct netdev *,
+                                      const struct netdev *);
 int dpif_offload_netdev_flush_flows(struct netdev *);
 int dpif_offload_netdev_hw_miss_packet_recover(struct netdev *,
                                                struct dp_packet *);

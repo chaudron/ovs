@@ -951,6 +951,19 @@ dpif_offload_get_netdev_by_port_id(struct dpif *dpif,
     return netdev;
 }
 
+
+bool
+dpif_offload_netdev_same_offload(const struct netdev *a,
+                                 const struct netdev *b)
+{
+    const struct dpif_offload *offload_a, *offload_b;
+
+    offload_a = ovsrcu_get(const struct dpif_offload *, &a->dpif_offload);
+    offload_b = ovsrcu_get(const struct dpif_offload *, &b->dpif_offload);
+
+    return offload_a == offload_b;
+}
+
 int
 dpif_offload_netdev_flush_flows(struct netdev *netdev)
 {

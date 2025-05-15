@@ -25,8 +25,8 @@
 
 #include "cmap.h"
 #include "dpif-netdev.h"
+#include "dpif-offload.h"
 #include "netdev-offload-dpdk.h"
-#include "netdev-offload-provider.h"
 #include "netdev-provider.h"
 #include "netdev-vport.h"
 #include "odp-util.h"
@@ -88,6 +88,7 @@ offload_data_init(struct netdev *netdev)
                                       sizeof *data->rte_flow_counters);
 
     ovsrcu_set(&netdev->hw_info.offload_data, (void *) data);
+    atomic_store_relaxed(&netdev->hw_info.miss_api_supported, true);
 
     return 0;
 }
@@ -1841,7 +1842,7 @@ add_output_action(struct netdev *netdev,
         VLOG_DBG_RL(&rl, "Cannot find netdev for odp port %"PRIu32, port);
         return -1;
     }
-    if (!netdev_flow_api_equals(netdev, outdev) ||
+    if (!dpif_offload_netdev_same_offload(netdev, outdev) ||
         add_represented_port_action(actions, outdev)) {
         VLOG_DBG_RL(&rl, "%s: Output to port \'%s\' cannot be offloaded.",
                     netdev_get_name(netdev), netdev_get_name(outdev));
@@ -2417,7 +2418,7 @@ get_netdev_odp_cb(struct netdev *netdev,
     return false;
 }
 
-static int
+int
 netdev_offload_dpdk_flow_put(struct netdev *netdev, struct match *match,
                              struct nlattr *actions, size_t actions_len,
                              const ovs_u128 *ufid, struct offload_info *info,
@@ -2468,7 +2469,7 @@ netdev_offload_dpdk_flow_put(struct netdev *netdev, struct match *match,
     return 0;
 }
 
-static int
+int
 netdev_offload_dpdk_flow_del(struct netdev *netdev OVS_UNUSED,
                              const ovs_u128 *ufid,
                              struct dpif_flow_stats *stats)
@@ -2486,8 +2487,8 @@ netdev_offload_dpdk_flow_del(struct netdev *netdev OVS_UNUSED,
     return netdev_offload_dpdk_flow_destroy(rte_flow_data);
 }
 
-static int
-netdev_offload_dpdk_init_flow_api(struct netdev *netdev)
+int
+netdev_offload_dpdk_init(struct netdev *netdev)
 {
     int ret = EOPNOTSUPP;
 
@@ -2505,15 +2506,15 @@ netdev_offload_dpdk_init_flow_api(struct netdev *netdev)
     return ret;
 }
 
-static void
-netdev_offload_dpdk_uninit_flow_api(struct netdev *netdev)
+void
+netdev_offload_dpdk_uninit(struct netdev *netdev)
 {
     if (netdev_dpdk_flow_api_supported(netdev, true)) {
         offload_data_destroy(netdev);
     }
 }
 
-static int
+int
 netdev_offload_dpdk_flow_get(struct netdev *netdev,
                              struct match *match OVS_UNUSED,
                              struct nlattr **actions OVS_UNUSED,
@@ -2792,12 +2793,3 @@ netdev_offload_dpdk_flow_get_n_offloaded(struct netdev *netdev)
 
     return total;
 }
-
-const struct netdev_flow_api netdev_offload_dpdk = {
-    .type = "dpdk_flow_api",
-    .flow_put = netdev_offload_dpdk_flow_put,
-    .flow_del = netdev_offload_dpdk_flow_del,
-    .init_flow_api = netdev_offload_dpdk_init_flow_api,
-    .uninit_flow_api = netdev_offload_dpdk_uninit_flow_api,
-    .flow_get = netdev_offload_dpdk_flow_get,
-};
