@@ -961,6 +961,7 @@ dpif_offload_netdev_same_offload(const struct netdev *a,
     offload_a = ovsrcu_get(const struct dpif_offload *, &a->dpif_offload);
     offload_b = ovsrcu_get(const struct dpif_offload *, &b->dpif_offload);
 
+    VLOG_ERR("EC_DEBUG: a=%p, b=%p", offload_a, offload_b);
     return offload_a == offload_b;
 }
 

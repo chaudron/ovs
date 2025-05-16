@@ -997,6 +997,10 @@ NS_CHECK_EXEC([at_ns0], [ping -q -c 3 -i 0.3 -W 2 10.1.1.100 | FORMAT_PING],
 3 packets transmitted, 3 received, 0% packet loss, time 0ms
 ])
 
+echo "----------------------------------------"
+ovs-appctl dpif/offload/show
+echo "----------------------------------------"
+
 # Check for a set tunnel action with df flag set.
 AT_CHECK([ovs-appctl dpctl/dump-flows type=tc,offloaded], [], [stdout])
 AT_CHECK(
