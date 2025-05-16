@@ -151,7 +151,8 @@ dp_offload_initialize(void)
                    && base_dpif_offload_classes[i]->close
                    && base_dpif_offload_classes[i]->can_offload
                    && base_dpif_offload_classes[i]->port_add
-                   && base_dpif_offload_classes[i]->port_del);
+                   && base_dpif_offload_classes[i]->port_del
+                   && base_dpif_offload_classes[i]->get_netdev);
 
         ovs_assert((base_dpif_offload_classes[i]->flow_dump_create &&
                     base_dpif_offload_classes[i]->flow_dump_next &&
@@ -1007,6 +1008,44 @@ dpif_offload_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread)
         offload->class->flow_dump_thread_destroy(offload_thread);
     }
     free(thread->offload_threads);
+}
+
+struct netdev *
+dpif_offload_offload_get_netdev_by_port_id(struct dpif_offload *offload,
+                                           odp_port_t port_no)
+{
+    if (!dpif_offload_is_offload_enabled() || !offload) {
+        return NULL;
+    }
+
+    return offload->class->get_netdev(offload, port_no);
+}
+
+struct netdev *
+dpif_offload_get_netdev_by_port_id(struct dpif *dpif,
+                                   struct dpif_offload **offload,
+                                   odp_port_t port_no)
+{
+    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
+    struct dpif_offload *tmp_offload;
+    struct netdev *netdev = NULL;
+
+    if (!dp_offload || !dpif_offload_is_offload_enabled()) {
+        return NULL;
+    }
+
+    LIST_FOR_EACH (tmp_offload, dpif_list_node,
+                   &dp_offload->offload_providers) {
+        netdev = tmp_offload->class->get_netdev(tmp_offload, port_no);
+        if (netdev) {
+            if (offload) {
+                *offload = tmp_offload;
+            }
+            break;
+        }
+    }
+
+    return netdev;
 }
 
 
