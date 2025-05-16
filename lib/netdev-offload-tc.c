@@ -2150,6 +2150,19 @@ parse_check_pkt_len_action(struct netdev *netdev, struct tc_flower *flower,
     return 0;
 }
 
+
+static bool
+netdev_flow_api_equals(const struct netdev *netdev1,
+                       const struct netdev *netdev2)
+{
+    const struct netdev_flow_api *netdev_flow_api1 =
+        ovsrcu_get(const struct netdev_flow_api *, &netdev1->flow_api);
+    const struct netdev_flow_api *netdev_flow_api2 =
+        ovsrcu_get(const struct netdev_flow_api *, &netdev2->flow_api);
+
+    return netdev_flow_api1 == netdev_flow_api2;
+}
+
 static int
 netdev_tc_parse_nl_actions(struct netdev *netdev, struct tc_flower *flower,
                            struct offload_info *info,
@@ -2182,7 +2195,14 @@ netdev_tc_parse_nl_actions(struct netdev *netdev, struct tc_flower *flower,
                 return ENODEV;
             }
 
-            if (!dpif_offload_netdev_same_offload(netdev, outdev)) {
+            if (netdev_flow_api_equals(netdev, outdev) != dpif_offload_netdev_same_offload(netdev, outdev)) {
+                VLOG_ERR("EC_DEBUG: netdev_flow_api_equals() =  %d, dpif_offload_netdev_same_offload() = %d",
+                         netdev_flow_api_equals(netdev, outdev),
+                         dpif_offload_netdev_same_offload(netdev, outdev));
+                VLOG_ERR("EC_DEBUG: netdev = %s, outdev = %s", netdev_get_name(netdev), netdev_get_name(outdev));
+            }
+
+            if (!netdev_flow_api_equals(netdev, outdev)) {
                 VLOG_DBG_RL(&rl,
                             "Flow API provider mismatch between ingress (%s) "
                             "and egress (%s) ports",

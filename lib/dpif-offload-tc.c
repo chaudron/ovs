@@ -77,6 +77,8 @@ static int
 dpif_offload_tc_enable_offload(struct dpif_offload *dpif_offload,
                                struct dpif_offload_port_mgr_port *port)
 {
+    VLOG_ERR("EC_DEBUG: SET OFFLOAD NETDEV: %s -> %p",
+             netdev_get_name(port->netdev), dpif_offload);
     dpif_offload_set_netdev_offload(port->netdev, dpif_offload);
     return 0;
 }
@@ -85,6 +87,9 @@ static int
 dpif_offload_tc_cleanup_offload(struct dpif_offload *dpif_offload OVS_UNUSED,
                                 struct dpif_offload_port_mgr_port *port)
 {
+    VLOG_ERR("EC_DEBUG: RESET OFFLOAD NETDEV: %s -> %p",
+             netdev_get_name(port->netdev), NULL);
+    ovs_assert(false);
     dpif_offload_set_netdev_offload(port->netdev, NULL);
     return 0;
 }
