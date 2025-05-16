@@ -838,7 +838,46 @@ dpif_offload_flow_dump_thread_destroy(struct dpif_flow_dump_thread *thread)
     free(thread->offload_threads);
 }
 
-
+struct netdev *
+dpif_offload_offload_get_netdev_by_port_id(struct dpif_offload *offload,
+                                           odp_port_t port_no)
+{
+    if (!dpif_offload_is_offload_enabled()) {
+        return NULL;
+    }
+
+    ovs_assert(port_no && offload);
+    return NULL;
+}
+
+struct netdev *
+dpif_offload_get_netdev_by_port_id(struct dpif *dpif,
+                                   struct dpif_offload **offload,
+                                   odp_port_t port_no)
+{
+    struct dpif_offload *tmp_offload;
+    struct netdev *netdev = NULL;
+
+    if (!dpif_offload_is_offload_enabled()) {
+        return NULL;
+    }
+
+    ovs_mutex_lock(&dpif->offload_mutex);
+    LIST_FOR_EACH (tmp_offload, dpif_list_node, &dpif->offload_providers) {
+        netdev = dpif_offload_offload_get_netdev_by_port_id(tmp_offload,
+                                                            port_no);
+        if (netdev) {
+            if (offload) {
+                *offload = tmp_offload;
+            }
+            break;
+        }
+    }
+    ovs_mutex_unlock(&dpif->offload_mutex);
+
+    return netdev;
+}
+
 int
 dpif_offload_netdev_flush_flows(struct netdev *netdev)
 {
