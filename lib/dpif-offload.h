@@ -47,6 +47,11 @@ void dpif_offload_meter_get(const struct dpif *dpif, ofproto_meter_id meter_id,
                             struct ofputil_meter_stats *stats);
 void dpif_offload_meter_del(const struct dpif *dpif, ofproto_meter_id meter_id,
                             struct ofputil_meter_stats *stats);
+struct netdev *dpif_offload_get_netdev_by_port_id(struct dpif *,
+                                                  struct dpif_offload **,
+                                                  odp_port_t);
+struct netdev *dpif_offload_offload_get_netdev_by_port_id(
+    struct dpif_offload *, odp_port_t);
 
 /* Netdev specific function, which can be used in the fast path. */
 int dpif_offload_netdev_flush_flows(struct netdev *);
