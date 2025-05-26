@@ -635,6 +635,10 @@ ipf_is_valid_v4_frag(struct ipf *ipf, struct dp_packet *pkt)
     return true;
 
 invalid_pkt:
+    if (!pkt->md.ct_state) {
+        pkt->md.ct_orig_tuple_ipv6 = false;
+        pkt->md.ct_orig_tuple.ipv4.ipv4_proto = 0;
+    }
     pkt->md.ct_state = CS_INVALID;
     return false;
 }
@@ -716,6 +720,10 @@ ipf_is_valid_v6_frag(struct ipf *ipf, struct dp_packet *pkt)
     return true;
 
 invalid_pkt:
+    if (!pkt->md.ct_state) {
+        pkt->md.ct_orig_tuple_ipv6 = true;
+        pkt->md.ct_orig_tuple.ipv6.ipv6_proto = 0;
+    }
     pkt->md.ct_state = CS_INVALID;
     return false;
 
@@ -836,6 +844,14 @@ ipf_process_frag(struct ipf *ipf, struct ipf_list *ipf_list,
         }
     } else {
         ipf_count(ipf, v6, IPF_NFRAGS_OVERLAP);
+        if (!pkt->md.ct_state) {
+            pkt->md.ct_orig_tuple_ipv6 = v6;
+            if (v6) {
+                pkt->md.ct_orig_tuple.ipv6.ipv6_proto = 0;
+            } else {
+                pkt->md.ct_orig_tuple.ipv4.ipv4_proto = 0;
+            }
+        }
         pkt->md.ct_state = CS_INVALID;
         return false;
     }
