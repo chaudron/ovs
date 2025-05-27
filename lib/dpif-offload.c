@@ -561,6 +561,26 @@ dpif_offload_port_set_config(struct dpif *dpif, odp_port_t port_no,
     }
 }
 
+struct dpif_offload *
+dpif_offload_port_offloaded_by(const struct dpif *dpif, odp_port_t port_no)
+{
+    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
+    struct dpif_offload *offload, *offload_return = NULL;
+
+    if (!dp_offload || !dpif_offload_is_offload_enabled()) {
+        return NULL;
+    }
+
+    LIST_FOR_EACH (offload, dpif_list_node, &dp_offload->offload_providers) {
+        if (offload->class->get_netdev(offload, port_no)) {
+            offload_return = offload;
+            break;
+        }
+    }
+
+    return offload_return;
+}
+
 void
 dpif_offload_dump_start(struct dpif_offload_dump *dump,
                         const struct dpif *dpif)
@@ -738,6 +758,32 @@ dpif_offload_flow_flush(struct dpif *dpif)
     }
 }
 
+enum dpif_offload_impl_type
+dpif_offload_get_impl_type(const struct dpif_offload *offload)
+{
+    return offload->class->impl_type;
+}
+
+enum dpif_offload_impl_type
+dpif_offload_get_impl_type_by_class(const char *type)
+{
+    enum dpif_offload_impl_type impl_type = DPIF_OFFLOAD_IMPL_NONE;
+    struct shash_node *node;
+
+    ovs_mutex_lock(&dpif_offload_mutex);
+    SHASH_FOR_EACH (node, &dpif_offload_classes) {
+        const struct dpif_offload_class *class = node->data;
+
+        if (!strcmp(type, class->type)) {
+            impl_type = class->impl_type;
+            break;
+        }
+    }
+    ovs_mutex_unlock(&dpif_offload_mutex);
+
+    return impl_type;
+}
+
 uint64_t
 dpif_offload_flow_get_n_offloaded(const struct dpif *dpif)
 {
@@ -751,6 +797,28 @@ dpif_offload_flow_get_n_offloaded(const struct dpif *dpif)
 
     LIST_FOR_EACH (offload, dpif_list_node, &dp_offload->offload_providers) {
         if (offload->class->flow_get_n_offloaded) {
+            flow_count += offload->class->flow_get_n_offloaded(offload);
+        }
+    }
+
+    return flow_count;
+}
+
+uint64_t
+dpif_offload_flow_get_n_offloaded_by_impl(const struct dpif *dpif,
+                                          enum dpif_offload_impl_type type)
+{
+    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
+    const struct dpif_offload *offload;
+    uint64_t flow_count = 0;
+
+    if (!dp_offload || !dpif_offload_is_offload_enabled()) {
+        return 0;
+    }
+
+    LIST_FOR_EACH (offload, dpif_list_node, &dp_offload->offload_providers) {
+        if (offload->class->flow_get_n_offloaded
+            && type == dpif_offload_get_impl_type(offload)) {
             flow_count += offload->class->flow_get_n_offloaded(offload);
         }
     }
