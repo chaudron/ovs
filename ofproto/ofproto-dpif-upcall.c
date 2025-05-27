@@ -826,12 +826,8 @@ udpif_get_n_flows(struct udpif *udpif)
         atomic_store_relaxed(&udpif->n_flows_timestamp, now);
         dpif_get_dp_stats(udpif->dpif, &stats);
         flow_count = stats.n_flows;
-
-        if (!dpif_synced_dp_layers(udpif->dpif)) {
-            /* If the dpif layer does not sync the flows, we need to include
-             * the hardware offloaded flows separately. */
-            flow_count += dpif_offload_flow_get_n_offloaded(udpif->dpif);
-        }
+        flow_count += dpif_offload_flow_get_n_offloaded_by_impl(
+            udpif->dpif, DPIF_OFFLOAD_IMPL_HW_ONLY);
 
         atomic_store_relaxed(&udpif->n_flows, flow_count);
         ovs_mutex_unlock(&udpif->n_flows_mutex);
@@ -2802,6 +2798,21 @@ udpif_update_used(struct udpif *udpif, struct udpif_key *ukey,
     return stats->used;
 }
 
+static bool
+did_dp_hw_only_offload_change(const char *old_type, const char *new_type)
+{
+    enum dpif_offload_impl_type old_impl = old_type ?
+        dpif_offload_get_impl_type_by_class(old_type) : DPIF_OFFLOAD_IMPL_NONE;
+    enum dpif_offload_impl_type new_impl = new_type ?
+        dpif_offload_get_impl_type_by_class(new_type) : DPIF_OFFLOAD_IMPL_NONE;
+
+    if (old_impl != new_impl && (old_impl == DPIF_OFFLOAD_IMPL_HW_ONLY ||
+                                 new_impl == DPIF_OFFLOAD_IMPL_HW_ONLY)) {
+        return true;
+    }
+    return false;
+}
+
 static void
 revalidate(struct revalidator *revalidator)
 {
@@ -2900,9 +2911,8 @@ revalidate(struct revalidator *revalidator)
 
             ukey->offloaded = f->attrs.offloaded;
             if (!ukey->dp_layer
-                || (!dpif_synced_dp_layers(udpif->dpif)
-                    && strcmp(ukey->dp_layer, f->attrs.dp_layer))) {
-
+                || did_dp_hw_only_offload_change(ukey->dp_layer,
+                                                 f->attrs.dp_layer)) {
                 if (ukey->dp_layer) {
                     /* The dp_layer has changed this is probably due to an
                      * earlier revalidate cycle moving it to/from hw offload.

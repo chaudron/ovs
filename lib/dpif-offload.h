@@ -30,6 +30,23 @@ struct dpif_offload_dump {
     void *state;
 };
 
+/* Definition of the DPIF offload implementation type.
+ *
+ * The 'DPIF_OFFLOAD_IMPL_SYNC' implementation has a single view, the offload
+ * provider is responsible for synchronizing flows and statistics through the
+ * dpif flow operations.  An example of this is DPDK's rte_flow.
+ *
+ * The 'DPIF_OFFLOAD_IMPL_HW_ONLY' implementation tries to install a hardware
+ * flow first. If successful, no dpif-layer software flow will be installed.
+ * Offload-specific callbacks are then used to manage the flow and query
+ * statistics. An example of this is kernel TC.
+ */
+enum dpif_offload_impl_type {
+    DPIF_OFFLOAD_IMPL_NONE,
+    DPIF_OFFLOAD_IMPL_SYNC,
+    DPIF_OFFLOAD_IMPL_HW_ONLY,
+};
+
 
 /* Global functions. */
 void dpif_offload_set_global_cfg(const struct ovsrec_open_vswitch *);
@@ -52,6 +69,8 @@ bool dpif_offload_dump_next(struct dpif_offload_dump *,
                             struct dpif_offload **);
 int dpif_offload_dump_done(struct dpif_offload_dump *);
 uint64_t dpif_offload_flow_get_n_offloaded(const struct dpif *);
+uint64_t dpif_offload_flow_get_n_offloaded_by_impl(
+    const struct dpif *, enum dpif_offload_impl_type);
 void dpif_offload_meter_set(const struct dpif *dpif, ofproto_meter_id meter_id,
                             struct ofputil_meter_config *);
 void dpif_offload_meter_get(const struct dpif *dpif, ofproto_meter_id meter_id,
@@ -63,6 +82,12 @@ struct netdev *dpif_offload_get_netdev_by_port_id(struct dpif *,
                                                   odp_port_t);
 struct netdev *dpif_offload_offload_get_netdev_by_port_id(
     struct dpif_offload *, odp_port_t);
+struct dpif_offload *dpif_offload_port_offloaded_by(const struct dpif *,
+                                                    odp_port_t);
+enum dpif_offload_impl_type dpif_offload_get_impl_type(
+    const struct dpif_offload *);
+enum dpif_offload_impl_type dpif_offload_get_impl_type_by_class(
+    const char *type);
 
 /* Iterates through each DPIF_OFFLOAD in DPIF, using DUMP as state.
  *
