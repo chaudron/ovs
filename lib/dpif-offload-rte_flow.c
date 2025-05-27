@@ -314,6 +314,7 @@ dpif_offload_rte_netdev_hw_miss_packet_recover(
 
 struct dpif_offload_class dpif_offload_rte_flow_class = {
     .type = "rte_flow",
+    .impl_type = DPIF_OFFLOAD_IMPL_SYNC,
     .supported_dpif_types = (const char *const[]) {
         "netdev",
         NULL},
