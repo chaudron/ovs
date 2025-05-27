@@ -310,6 +310,7 @@ dpif_offload_dpdk_netdev_hw_miss_packet_postprocess(
 
 struct dpif_offload_class dpif_offload_dpdk_class = {
     .type = "dpdk",
+    .impl_type = DPIF_OFFLOAD_IMPL_SYNC,
     .supported_dpif_types = (const char *const[]) {
         "netdev",
         NULL},

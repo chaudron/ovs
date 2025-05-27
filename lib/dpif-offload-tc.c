@@ -560,6 +560,7 @@ dpif_offload_tc_flow_dump_thread_destroy(
 
 struct dpif_offload_class dpif_offload_tc_class = {
     .type = "tc",
+    .impl_type = DPIF_OFFLOAD_IMPL_HW_ONLY,
     .supported_dpif_types = (const char *const[]) {
         "system",
         NULL},
