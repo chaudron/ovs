@@ -2300,11 +2300,11 @@ netdev_tc_parse_nl_actions(struct netdev *netdev, struct tc_flower *flower,
     return 0;
 }
 
-static int
-netdev_tc_flow_put(struct netdev *netdev, struct match *match,
-                   struct nlattr *actions, size_t actions_len,
-                   const ovs_u128 *ufid, struct offload_info *info,
-                   struct dpif_flow_stats *stats)
+int
+netdev_offload_tc_flow_put(struct netdev *netdev, struct match *match,
+                           struct nlattr *actions, size_t actions_len,
+                           const ovs_u128 *ufid, struct offload_info *info,
+                           struct dpif_flow_stats *stats)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
     enum tc_qdisc_hook hook = get_tc_qdisc_hook(netdev);
@@ -2672,6 +2672,7 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     if (get_ufid_tc_mapping(ufid, &id) == 0) {
         VLOG_DBG_RL(&rl, "updating old handle: %d prio: %d",
                     id.handle, id.prio);
+        info->tc_modify_flow = true;
         info->tc_modify_flow_deleted = !del_filter_and_ufid_mapping(
             &id, ufid, &adjust_stats);
     }
@@ -2720,14 +2721,14 @@ netdev_tc_flow_put(struct netdev *netdev, struct match *match,
     return err;
 }
 
-static int
-netdev_tc_flow_get(struct netdev *netdev,
-                   struct match *match,
-                   struct nlattr **actions,
-                   const ovs_u128 *ufid,
-                   struct dpif_flow_stats *stats,
-                   struct dpif_flow_attrs *attrs,
-                   struct ofpbuf *buf)
+int
+netdev_offload_tc_flow_get(struct netdev *netdev,
+                           struct match *match,
+                           struct nlattr **actions,
+                           const ovs_u128 *ufid,
+                           struct dpif_flow_stats *stats,
+                           struct dpif_flow_attrs *attrs,
+                           struct ofpbuf *buf)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
     struct tc_flower flower;
@@ -2777,10 +2778,9 @@ netdev_tc_flow_get(struct netdev *netdev,
     return 0;
 }
 
-static int
-netdev_tc_flow_del(struct netdev *netdev OVS_UNUSED,
-                   const ovs_u128 *ufid,
-                   struct dpif_flow_stats *stats)
+int
+netdev_offload_tc_flow_del(const ovs_u128 *ufid,
+                           struct dpif_flow_stats *stats)
 {
     struct tcf_id id;
     int error;
@@ -3464,8 +3464,5 @@ dpif_offload_tc_meter_del(const struct dpif_offload *offload OVS_UNUSED,
 
 const struct netdev_flow_api netdev_offload_tc = {
    .type = "linux_tc",
-   .flow_put = netdev_tc_flow_put,
-   .flow_get = netdev_tc_flow_get,
-   .flow_del = netdev_tc_flow_del,
    .init_flow_api = netdev_tc_init_flow_api,
 };
