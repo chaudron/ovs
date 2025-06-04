@@ -915,8 +915,9 @@ daemon_become_new_user(bool access_datapath, bool access_hardware_ports)
 static size_t
 get_sysconf_buffer_size(void)
 {
-    size_t bufsize, pwd_bs = 0, grp_bs = 0;
     const size_t default_bufsize = 1024;
+    long pwd_bs = 0, grp_bs = 0;
+    size_t bufsize;
 
     errno = 0;
     if ((pwd_bs = sysconf(_SC_GETPW_R_SIZE_MAX)) == -1) {
