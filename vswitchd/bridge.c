@@ -3402,7 +3402,6 @@ bridge_run(void)
      }
 
     if (cfg) {
-        netdev_set_flow_api_enabled(&cfg->other_config);
         dpdk_init(&cfg->other_config);
         userspace_tso_init(&cfg->other_config);
     }

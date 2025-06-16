@@ -376,7 +376,6 @@ do_open(const char *name, const char *type, bool create, struct dpif **dpifp)
 
             if (!err) {
                 netdev_set_dpif_type(netdev, dpif_type_str);
-                netdev_ports_insert(netdev, &dpif_port);
                 netdev_close(netdev);
             } else {
                 VLOG_WARN("could not open netdev %s type %s: %s",
@@ -438,19 +437,6 @@ dpif_create_and_open(const char *name, const char *type, struct dpif **dpifp)
     return error;
 }
 
-static void
-dpif_remove_netdev_ports(struct dpif *dpif) {
-    const char *dpif_type_str = dpif_normalize_type(dpif_type(dpif));
-    struct dpif_port_dump port_dump;
-    struct dpif_port dpif_port;
-
-    DPIF_PORT_FOR_EACH (&dpif_port, &port_dump, dpif) {
-        if (!dpif_is_tap_port(dpif_port.type)) {
-            netdev_ports_remove(dpif_port.port_no, dpif_type_str);
-        }
-    }
-}
-
 /* Closes and frees the connection to 'dpif'.  Does not destroy the datapath
  * itself; call dpif_delete() first, instead, if that is desirable. */
 void
@@ -461,9 +447,6 @@ dpif_close(struct dpif *dpif)
 
         rc = shash_find_data(&dpif_classes, dpif->dpif_class->type);
 
-        if (rc->refcount == 1) {
-            dpif_remove_netdev_ports(dpif);
-        }
         dpif_offload_detach_providers(dpif);
         dpif_uninit(dpif, true);
         dp_class_unref(rc);
@@ -621,17 +604,9 @@ dpif_port_add(struct dpif *dpif, struct netdev *netdev, odp_port_t *port_nop)
                     dpif_name(dpif), netdev_name, port_no);
 
         if (!dpif_is_tap_port(netdev_get_type(netdev))) {
-
             const char *dpif_type_str = dpif_normalize_type(dpif_type(dpif));
-            struct dpif_port dpif_port;
 
             netdev_set_dpif_type(netdev, dpif_type_str);
-
-            dpif_port.type = CONST_CAST(char *, netdev_get_type(netdev));
-            dpif_port.name = CONST_CAST(char *, netdev_name);
-            dpif_port.port_no = port_no;
-            netdev_ports_insert(netdev, &dpif_port);
-
             dpif_offload_port_add(dpif, netdev, port_no);
         }
     } else {
@@ -665,8 +640,6 @@ dpif_port_del(struct dpif *dpif, odp_port_t port_no, bool local_delete)
     }
 
     dpif_offload_port_del(dpif, port_no);
-
-    netdev_ports_remove(port_no, dpif_normalize_type(dpif_type(dpif)));
     return error;
 }
 
