@@ -97,6 +97,35 @@ dpif_offload_dummy_port_del(struct dpif_offload *dpif_offload,
     return 0;
 }
 
+static int
+dpif_offload_dummy_port_dump_start(const struct dpif_offload *offload_,
+                                      void **statep)
+{
+    struct dpif_offload_dummy *offload = dpif_offload_dummy_cast(offload_);
+
+    return dpif_offload_port_mgr_port_dump_start(offload->port_mgr, statep);
+}
+
+static int
+dpif_offload_dummy_port_dump_next(const struct dpif_offload *offload_,
+                                  void *state,
+                                  struct dpif_offload_port *port)
+{
+    struct dpif_offload_dummy *offload = dpif_offload_dummy_cast(offload_);
+
+    return dpif_offload_port_mgr_port_dump_next(offload->port_mgr, state,
+                                                port);
+}
+
+static int
+dpif_offload_dummy_port_dump_done(const struct dpif_offload *offload_,
+                                  void *state)
+{
+    struct dpif_offload_dummy *offload = dpif_offload_dummy_cast(offload_);
+
+    return dpif_offload_port_mgr_port_dump_done(offload->port_mgr, state);
+}
+
 static struct netdev *
 dpif_offload_dummy_get_netdev(struct dpif_offload *dpif_offload,
                               odp_port_t port_no)
@@ -250,21 +279,24 @@ dpif_offload_dummy_can_offload(struct dpif_offload *dpif_offload OVS_UNUSED,
     return is_dummy_netdev_class(netdev->netdev_class) ? true : false;
 }
 
-#define DEFINE_DPIF_DUMMY_CLASS(NAME, TYPE_STR)         \
-    struct dpif_offload_class NAME = {                  \
-        .type = TYPE_STR,                               \
-        .impl_type = DPIF_OFFLOAD_IMPL_HW_ONLY,         \
-        .supported_dpif_types = (const char *const[]) { \
-            "dummy",                                    \
-            NULL},                                      \
-        .open = dpif_offload_dummy_open,                \
-        .close = dpif_offload_dummy_close,              \
-        .set_config = dpif_offload_dummy_set_config,    \
-        .get_debug = dpif_offload_dummy_get_debug,      \
-        .can_offload = dpif_offload_dummy_can_offload,  \
-        .port_add = dpif_offload_dummy_port_add,        \
-        .port_del = dpif_offload_dummy_port_del,        \
-        .get_netdev = dpif_offload_dummy_get_netdev,    \
+#define DEFINE_DPIF_DUMMY_CLASS(NAME, TYPE_STR)                 \
+    struct dpif_offload_class NAME = {                          \
+        .type = TYPE_STR,                                       \
+        .impl_type = DPIF_OFFLOAD_IMPL_HW_ONLY,                 \
+        .supported_dpif_types = (const char *const[]) {         \
+            "dummy",                                            \
+            NULL},                                              \
+        .open = dpif_offload_dummy_open,                        \
+        .close = dpif_offload_dummy_close,                      \
+        .set_config = dpif_offload_dummy_set_config,            \
+        .get_debug = dpif_offload_dummy_get_debug,              \
+        .can_offload = dpif_offload_dummy_can_offload,          \
+        .port_add = dpif_offload_dummy_port_add,                \
+        .port_del = dpif_offload_dummy_port_del,                \
+        .port_dump_start = dpif_offload_dummy_port_dump_start,  \
+        .port_dump_next = dpif_offload_dummy_port_dump_next,    \
+        .port_dump_done = dpif_offload_dummy_port_dump_done,    \
+        .get_netdev = dpif_offload_dummy_get_netdev,            \
     }
 
 DEFINE_DPIF_DUMMY_CLASS(dpif_offload_dummy_class, "dummy");
