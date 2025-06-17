@@ -168,6 +168,9 @@ static bool dpif_offload_rte_late_enable(struct dpif_offload_port_mgr_port *p,
     return false;
 }
 
+/* XXX: External reference, will be removed after full integration. */
+void rte_flow_offload_thread_set_thread_nb(unsigned int thread_nb);
+
 static void
 dpif_offload_rte_set_config(struct dpif_offload *offload,
                            const struct smap *other_cfg)
@@ -195,6 +198,8 @@ dpif_offload_rte_set_config(struct dpif_offload *offload,
                           offload_thread_nb,
                           offload_thread_nb > 1 ? "s" : "");
             }
+
+            rte_flow_offload_thread_set_thread_nb(offload_thread_nb);
 
             dpif_offload_port_mgr_traverse_ports(offload_rte->port_mgr,
                                                  dpif_offload_rte_late_enable,
@@ -331,11 +336,3 @@ struct dpif_offload_class dpif_offload_rte_flow_class = {
     .netdev_hw_miss_packet_recover = \
         dpif_offload_rte_netdev_hw_miss_packet_recover,
 };
-
-/* XXX: Temporary functions below, which will be removed once fully
- *      refactored. */
-unsigned int dpif_offload_rte_get_thread_nb(void);
-unsigned int dpif_offload_rte_get_thread_nb(void)
-{
-    return offload_thread_nb;
-}
