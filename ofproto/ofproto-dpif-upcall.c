@@ -971,7 +971,7 @@ udpif_run_flow_rebalance(struct udpif *udpif)
         return;
     }
 
-    if (!netdev_any_oor()) {
+    if (!dpif_offload_netdevs_out_of_resources(udpif->dpif)) {
         return;
     }
 
