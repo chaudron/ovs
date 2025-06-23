@@ -330,13 +330,6 @@ dpif_offload_tc_netdev_flow_flush_(struct netdev *netdev)
     return netdev_offload_tc_flow_flush(netdev);
 }
 
-static int
-dpif_offload_tc_netdev_flow_flush(const struct dpif_offload *offload
-                                  OVS_UNUSED, struct netdev *netdev)
-{
-    return dpif_offload_tc_netdev_flow_flush_(netdev);
-}
-
 static bool
 dpif_offload_tc_flow_flush_cb(struct dpif_offload_port_mgr_port *port,
                               void *aux)
@@ -877,5 +870,4 @@ struct dpif_offload_class dpif_offload_tc_class = {
     .meter_get = dpif_offload_tc_meter_get,
     .meter_del = dpif_offload_tc_meter_del,
     .get_netdev = dpif_offload_tc_get_netdev,
-    .netdev_flow_flush = dpif_offload_tc_netdev_flow_flush,
 };
