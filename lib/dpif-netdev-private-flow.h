@@ -109,11 +109,6 @@ struct dp_netdev_flow {
     /* Statistics. */
     struct dp_netdev_flow_stats stats;
 
-    /* Statistics and attributes received from the netdev offload provider. */
-    atomic_int netdev_flow_get_result;
-    struct dp_netdev_flow_stats last_stats;
-    struct dp_netdev_flow_attrs last_attrs;
-
     /* Actions. */
     OVSRCU_TYPE(struct dp_netdev_actions *) actions;
 
