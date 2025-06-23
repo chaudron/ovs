@@ -1187,18 +1187,13 @@ dpif_offload_offload_get_netdev_by_port_id(struct dpif_offload *offload,
     return offload->class->get_netdev(offload, port_no);
 }
 
-struct netdev *
-dpif_offload_get_netdev_by_port_id(struct dpif *dpif,
-                                   struct dpif_offload **offload,
-                                   odp_port_t port_no)
+static struct netdev *
+dpif_offload_get_netdev_by_port_id_(struct dp_offload *dp_offload,
+                                    struct dpif_offload **offload,
+                                    odp_port_t port_no)
 {
-    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
     struct dpif_offload *tmp_offload;
     struct netdev *netdev = NULL;
-
-    if (!dp_offload || !dpif_offload_is_offload_enabled()) {
-        return NULL;
-    }
 
     LIST_FOR_EACH (tmp_offload, dpif_list_node,
                    &dp_offload->offload_providers) {
@@ -1210,8 +1205,21 @@ dpif_offload_get_netdev_by_port_id(struct dpif *dpif,
             break;
         }
     }
-
     return netdev;
+}
+
+struct netdev *
+dpif_offload_get_netdev_by_port_id(struct dpif *dpif,
+                                   struct dpif_offload **offload,
+                                   odp_port_t port_no)
+{
+    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
+
+    if (!dp_offload || !dpif_offload_is_offload_enabled()) {
+        return NULL;
+    }
+
+    return dpif_offload_get_netdev_by_port_id_(dp_offload, offload, port_no);
 }
 
 bool
@@ -1378,6 +1386,109 @@ dpif_offload_netdev_flush_flows(struct netdev *netdev)
         return offload->class->netdev_flow_flush(offload, netdev);
     }
     return EOPNOTSUPP;
+}
+
+int
+dpif_offload_datapath_flow_put(const char *dpif_name,
+                               struct dpif_offload_flow_put *put,
+                               uint32_t *flow_mark)
+{
+    struct dpif_offload *offload;
+    struct dp_offload *dp_offload;
+    struct netdev *netdev;
+
+    ovs_mutex_lock(&dpif_offload_mutex);
+    /* XXX: Implement a faster solution than the current dpif_name lookup. */
+    dp_offload = shash_find_data(&dpif_offload_providers, dpif_name);
+    ovs_mutex_unlock(&dpif_offload_mutex);
+
+    if (OVS_UNLIKELY(!dp_offload)) {
+        if (flow_mark) {
+            *flow_mark = INVALID_FLOW_MARK;
+        }
+        return 0;
+    }
+
+    netdev = dpif_offload_get_netdev_by_port_id_(dp_offload, &offload,
+                                                 put->in_port);
+
+    if (OVS_LIKELY(netdev && offload->class->netdev_flow_put)) {
+        return offload->class->netdev_flow_put(offload, netdev, put,
+                                               flow_mark);
+    }
+
+    if (flow_mark) {
+        *flow_mark = INVALID_FLOW_MARK;
+    }
+    return 0;
+}
+
+int
+dpif_offload_datapath_flow_del(const char *dpif_name,
+                               struct dpif_offload_flow_del *del,
+                               uint32_t *flow_mark)
+{
+    struct dpif_offload *offload;
+    struct dp_offload *dp_offload;
+    struct netdev *netdev;
+
+    ovs_mutex_lock(&dpif_offload_mutex);
+    /* XXX: Implement a faster solution than the current dpif_name lookup. */
+    dp_offload = shash_find_data(&dpif_offload_providers, dpif_name);
+    ovs_mutex_unlock(&dpif_offload_mutex);
+
+    if (OVS_UNLIKELY(!dp_offload)) {
+        if (flow_mark) {
+            *flow_mark = INVALID_FLOW_MARK;
+        }
+        return 0;
+    }
+
+    netdev = dpif_offload_get_netdev_by_port_id_(dp_offload, &offload,
+                                                 del->in_port);
+
+    if (OVS_LIKELY(netdev && offload->class->netdev_flow_del)) {
+        return offload->class->netdev_flow_del(offload, netdev, del,
+                                               flow_mark);
+    }
+
+    if (flow_mark) {
+        *flow_mark = INVALID_FLOW_MARK;
+    }
+    return 0;
+}
+
+bool
+dpif_offload_datapath_flow_stats(const char *dpif_name, odp_port_t in_port,
+                                 const ovs_u128 *ufid,
+                                 struct dpif_flow_stats *stats,
+                                 struct dpif_flow_attrs *attrs)
+{
+    struct dpif_offload *offload;
+    struct dp_offload *dp_offload;
+    struct netdev *netdev;
+
+    if (!dpif_offload_is_offload_enabled()) {
+        return false;
+    }
+
+    ovs_mutex_lock(&dpif_offload_mutex);
+    /* XXX: Implement a faster solution than the current dpif_name lookup. */
+    dp_offload = shash_find_data(&dpif_offload_providers, dpif_name);
+    ovs_mutex_unlock(&dpif_offload_mutex);
+
+    if (OVS_UNLIKELY(!dp_offload)) {
+        return false;
+    }
+
+    netdev = dpif_offload_get_netdev_by_port_id_(dp_offload, &offload,
+                                                 in_port);
+
+    if (OVS_LIKELY(netdev && offload->class->netdev_flow_stats)) {
+        return offload->class->netdev_flow_stats(offload, netdev, ufid, stats,
+                                                 attrs);
+    }
+    return false;
 }
 
 int
