@@ -154,7 +154,6 @@ int dpif_offload_stats_get(struct dpif *, struct netdev_custom_stats **stats,
 /* Netdev specific function, which can be used in the fast path. */
 bool dpif_offload_netdev_same_offload(const struct netdev *,
                                       const struct netdev *);
-int dpif_offload_netdev_flush_flows(struct netdev *);
 int dpif_offload_netdev_hw_miss_packet_postprocess(struct netdev *,
                                                    struct dp_packet *);
 
