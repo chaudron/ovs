@@ -102,17 +102,13 @@ struct dp_netdev_flow {
     struct ovs_refcount ref_cnt;
 
     bool dead;
+    bool offloaded;
     uint32_t mark;               /* Unique flow mark for netdev offloading. */
     uint64_t simple_match_mark;  /* Unique flow mark for the simple match. */
     odp_port_t orig_in_port;
 
     /* Statistics. */
     struct dp_netdev_flow_stats stats;
-
-    /* Statistics and attributes received from the netdev offload provider. */
-    atomic_int netdev_flow_get_result;
-    struct dp_netdev_flow_stats last_stats;
-    struct dp_netdev_flow_attrs last_attrs;
 
     /* Actions. */
     OVSRCU_TYPE(struct dp_netdev_actions *) actions;
@@ -145,6 +141,7 @@ netdev_flow_key_size(size_t flow_u64s)
 
 /* forward declaration required for EMC to unref flows */
 void dp_netdev_flow_unref(struct dp_netdev_flow *);
+bool dp_netdev_flow_ref(struct dp_netdev_flow *flow); //XXX: Should be removed, and made static again.
 
 /* A set of datapath actions within a "struct dp_netdev_flow".
  *

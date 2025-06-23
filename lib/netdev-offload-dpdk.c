@@ -40,7 +40,7 @@ VLOG_DEFINE_THIS_MODULE(netdev_offload_dpdk);
 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(600, 600);
 
 /* XXX: Temporarily external declarations, will be removed during cleanup. */
-unsigned int rte_flow_offload_thread_nb(void);
+unsigned int dpif_offload_rte_offload_thread_count(void);
 unsigned int rte_flow_offload_thread_id(void);
 struct netdev *dpif_netdev_offload_get_netdev_by_port_id(odp_port_t);
 void dpif_netdev_offload_ports_traverse(
@@ -91,7 +91,7 @@ offload_data_init(struct netdev *netdev)
     data = xzalloc(sizeof *data);
     ovs_mutex_init(&data->map_lock);
     cmap_init(&data->ufid_to_rte_flow);
-    data->rte_flow_counters = xcalloc(rte_flow_offload_thread_nb(),
+    data->rte_flow_counters = xcalloc(dpif_offload_rte_offload_thread_count(),
                                       sizeof *data->rte_flow_counters);
 
     ovsrcu_set(&netdev->hw_info.offload_data, (void *) data);
@@ -2789,7 +2789,7 @@ netdev_offload_dpdk_flow_get_n_offloaded(struct netdev *netdev)
         return 0;
     }
 
-    for (tid = 0; tid < rte_flow_offload_thread_nb(); tid++) {
+    for (tid = 0; tid < dpif_offload_rte_offload_thread_count(); tid++) {
         total += data->rte_flow_counters[tid];
     }
 

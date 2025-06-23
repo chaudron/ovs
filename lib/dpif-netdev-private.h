@@ -44,9 +44,23 @@ dp_netdev_batch_execute(struct dp_netdev_pmd_thread *pmd,
                         uint32_t bytes,
                         uint16_t tcp_flags);
 
+/* XXX: Remove once hw-offload is fully separated from dpif-netdev. */
+#ifdef DPDK_NETDEV
 int
-dp_netdev_hw_flow(const struct dp_netdev_pmd_thread *pmd,
-                  struct dp_packet *packet,
-                  struct dp_netdev_flow **flow);
+dpif_offload_rte_partial_offload_hw_flow(
+    const struct dp_netdev_pmd_thread *pmd, struct dp_packet *packet,
+    struct dp_netdev_flow **flow);
+#else
+static inline int
+dpif_offload_rte_partial_offload_hw_flow(
+    const struct dp_netdev_pmd_thread *pmd OVS_UNUSED,
+    struct dp_packet *packet OVS_UNUSED,
+    struct dp_netdev_flow **flow)
+{
+    *flow = NULL;
+    return 0;
+}
+#endif
+
 
 #endif /* dpif-netdev-private.h */
