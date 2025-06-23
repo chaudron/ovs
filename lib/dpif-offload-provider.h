@@ -281,10 +281,6 @@ struct dpif_offload_class {
      * reasons.  They are intended for use in fast path processing and should
      * be designed with speed and efficiency in mind. */
 
-    /* Deletes all offloaded flows on this netdev.  Return 0 if successful,
-     *  otherwise returns a positive errno value. */
-    int (*netdev_flow_flush)(const struct dpif_offload *, struct netdev *);
-
     /* Recover the packet state (contents and data) for continued processing
      * in software.  Return 0 if successful, otherwise returns a positive
      * errno value and takes ownership of a packet if errno != EOPNOTSUPP. */
