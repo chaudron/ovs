@@ -40,7 +40,6 @@ VLOG_DEFINE_THIS_MODULE(netdev_offload_dpdk);
 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(600, 600);
 
 /* XXX: Temporarily external declarations, will be removed during cleanup. */
-unsigned int rte_flow_offload_thread_nb(void);
 unsigned int rte_flow_offload_thread_id(void);
 struct netdev *dpif_netdev_offload_get_netdev_by_port_id(odp_port_t);
 void dpif_netdev_offload_ports_traverse(
@@ -84,14 +83,14 @@ struct netdev_offload_dpdk_data {
 };
 
 static int
-offload_data_init(struct netdev *netdev)
+offload_data_init(struct netdev *netdev, unsigned int offload_thread_count)
 {
     struct netdev_offload_dpdk_data *data;
 
     data = xzalloc(sizeof *data);
     ovs_mutex_init(&data->map_lock);
     cmap_init(&data->ufid_to_rte_flow);
-    data->rte_flow_counters = xcalloc(rte_flow_offload_thread_nb(),
+    data->rte_flow_counters = xcalloc(offload_thread_count,
                                       sizeof *data->rte_flow_counters);
 
     ovsrcu_set(&netdev->hw_info.offload_data, (void *) data);
@@ -2308,7 +2307,8 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
                              struct nlattr *nl_actions,
                              size_t actions_len,
                              const ovs_u128 *ufid,
-                             struct dpif_netdev_offload_info *info)
+                             uint32_t flow_mark,
+                             odp_port_t orig_in_port)
 {
     struct flow_patterns patterns = {
         .items = NULL,
@@ -2319,7 +2319,7 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
     bool actions_offloaded = true;
     struct rte_flow *flow;
 
-    if (parse_flow_match(netdev, info->orig_in_port, &patterns, match)) {
+    if (parse_flow_match(netdev, orig_in_port, &patterns, match)) {
         VLOG_DBG_RL(&rl, "%s: matches of ufid "UUID_FMT" are not supported",
                     netdev_get_name(netdev), UUID_ARGS((struct uuid *) ufid));
         goto out;
@@ -2332,7 +2332,7 @@ netdev_offload_dpdk_add_flow(struct netdev *netdev,
          * actions.
          */
         flow = netdev_offload_dpdk_mark_rss(&patterns, netdev,
-                                            info->flow_mark);
+                                            flow_mark);
         actions_offloaded = false;
     }
 
@@ -2425,8 +2425,8 @@ get_netdev_odp_cb(struct netdev *netdev,
 int
 netdev_offload_dpdk_flow_put(struct netdev *netdev, struct match *match,
                              struct nlattr *actions, size_t actions_len,
-                             const ovs_u128 *ufid,
-                             struct dpif_netdev_offload_info *info,
+                             const ovs_u128 *ufid, uint32_t flow_mark,
+                             odp_port_t orig_in_port,
                              struct dpif_flow_stats *stats)
 {
     struct ufid_to_rte_flow_data *rte_flow_data;
@@ -2450,7 +2450,7 @@ netdev_offload_dpdk_flow_put(struct netdev *netdev, struct match *match,
          * provided by upper layer cannot be used.
          */
         dpif_netdev_offload_ports_traverse(get_netdev_odp_cb, &aux);
-        info->orig_in_port = aux.odp_port;
+        orig_in_port = aux.odp_port;
         old_stats = rte_flow_data->stats;
         modification = true;
         ret = netdev_offload_dpdk_flow_destroy(rte_flow_data);
@@ -2460,7 +2460,8 @@ netdev_offload_dpdk_flow_put(struct netdev *netdev, struct match *match,
     }
 
     rte_flow_data = netdev_offload_dpdk_add_flow(netdev, match, actions,
-                                                 actions_len, ufid, info);
+                                                 actions_len, ufid, flow_mark,
+                                                 orig_in_port);
     if (!rte_flow_data) {
         return -1;
     }
@@ -2492,7 +2493,8 @@ netdev_offload_dpdk_flow_del(struct netdev *netdev OVS_UNUSED,
 }
 
 int
-netdev_offload_dpdk_init(struct netdev *netdev)
+netdev_offload_dpdk_init(struct netdev *netdev,
+                         unsigned int offload_thread_count)
 {
     int ret = EOPNOTSUPP;
 
@@ -2504,7 +2506,7 @@ netdev_offload_dpdk_init(struct netdev *netdev)
     }
 
     if (netdev_dpdk_flow_api_supported(netdev, false)) {
-        ret = offload_data_init(netdev);
+        ret = offload_data_init(netdev, offload_thread_count);
     }
 
     return ret;
@@ -2777,7 +2779,8 @@ close_vport_netdev:
 }
 
 uint64_t
-netdev_offload_dpdk_flow_get_n_offloaded(struct netdev *netdev)
+netdev_offload_dpdk_flow_get_n_offloaded(struct netdev *netdev,
+                                         unsigned int offload_thread_count)
 {
     struct netdev_offload_dpdk_data *data;
     uint64_t total = 0;
@@ -2789,7 +2792,7 @@ netdev_offload_dpdk_flow_get_n_offloaded(struct netdev *netdev)
         return 0;
     }
 
-    for (tid = 0; tid < rte_flow_offload_thread_nb(); tid++) {
+    for (tid = 0; tid < offload_thread_count; tid++) {
         total += data->rte_flow_counters[tid];
     }
 
