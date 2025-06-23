@@ -52,7 +52,8 @@ struct dp_offload {
 /* This structure should be treated as opaque by dpif offload implementations.
  */
 struct dpif_offload {
-    const struct dpif_offload_class *class;
+    const struct
+     dpif_offload_class *class;
     struct ovs_list dpif_list_node;
     char *name;
 };
@@ -281,8 +282,23 @@ struct dpif_offload_class {
      * errno value and takes ownership of a packet if errno != EOPNOTSUPP. */
     int (*netdev_hw_miss_packet_recover)(const struct dpif_offload *,
                                          struct netdev *, struct dp_packet *);
-};
 
+    /* Add or modify the specified flow directly in the offload datapath.
+     * The actual implementation may choose to handle the offload
+     * asynchronously by returning EINPROGRESS and invoking the supplied
+     * 'callback' once completed.  For successful synchronous handling, the
+     * callback must not be called, and 0 should be returned.  If this call is
+     * not successful, a positive errno value should be returned. */
+    int (*netdev_flow_put)(const struct dpif_offload *, struct netdev *,
+                           struct dpif_offload_flow_put *,
+                           uint32_t *flow_mark);
+
+    /* Delete the specified flow directly from the offloaded datapath.  See the
+     * above 'netdev_flow_put' for implementation details. */
+    int (*netdev_flow_del)(const struct dpif_offload *, struct netdev *,
+                           struct dpif_offload_flow_del *, 
+                           uint32_t *flow_mark);
+};
 
 extern struct dpif_offload_class dpif_offload_dummy_class;
 extern struct dpif_offload_class dpif_offload_dummy_x_class;
