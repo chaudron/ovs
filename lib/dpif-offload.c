@@ -20,6 +20,7 @@
 #include "dpif-offload.h"
 #include "dpif-offload-provider.h"
 #include "dpif-provider.h"
+#include "id-fpool.h"
 #include "netdev-provider.h"
 #include "unixctl.h"
 #include "util.h"
@@ -1316,6 +1317,41 @@ dpif_offload_operate(struct dpif *dpif, struct dpif_op **ops, size_t n_ops,
     }
 
     return n_ops_left;
+}
+
+#define MAX_FLOW_MARK       (UINT32_MAX - 1)
+#define MAX_FLOW_MARK_USERS 8
+static struct id_fpool *flow_mark_pool;
+
+uint32_t
+dpif_offload_allocate_flow_mark(void)
+{
+    static struct ovsthread_once init_once = OVSTHREAD_ONCE_INITIALIZER;
+    unsigned int uid = ovsthread_id_self() % MAX_FLOW_MARK_USERS;
+    uint32_t flow_mark;
+
+    if (ovsthread_once_start(&init_once)) {
+        /* Haven't initiated yet, do it here. */
+        flow_mark_pool = id_fpool_create(MAX_FLOW_MARK_USERS, 1,
+                                         MAX_FLOW_MARK);
+        ovsthread_once_done(&init_once);
+    }
+
+    if (id_fpool_new_id(flow_mark_pool, uid, &flow_mark)) {
+        return flow_mark;
+    }
+
+    return INVALID_FLOW_MARK;
+}
+
+void
+dpif_offload_free_flow_mark(uint32_t flow_mark)
+{
+    if (flow_mark != INVALID_FLOW_MARK) {
+        unsigned int uid = ovsthread_id_self() % MAX_FLOW_MARK_USERS;
+
+        id_fpool_free_id(flow_mark_pool, uid, flow_mark);
+    }
 }
 
 
