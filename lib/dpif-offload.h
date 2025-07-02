@@ -47,11 +47,15 @@ enum dpif_offload_impl_type {
     DPIF_OFFLOAD_IMPL_HW_ONLY,
 };
 
+#define INVALID_FLOW_MARK 0
+
 
 /* Global functions. */
 void dpif_offload_set_global_cfg(const struct ovsrec_open_vswitch *);
 bool dpif_offload_is_offload_enabled(void);
 bool dpif_offload_is_offload_rebalance_policy_enabled(void);
+uint32_t dpif_offload_allocate_flow_mark(void);
+void dpif_offload_free_flow_mark(uint32_t flow_mark);
 
 
 /* Per dpif specific functions. */
