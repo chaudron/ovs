@@ -2441,6 +2441,8 @@ netdev_free_custom_stats_counters(struct netdev_custom_stats *custom_stats)
             custom_stats->counters = NULL;
             custom_stats->size = 0;
         }
+        free(custom_stats->label);
+        custom_stats->label = NULL;
     }
 }
 
