@@ -425,6 +425,48 @@ dpif_offload_get_debug(const struct dpif_offload *offload, struct ds *ds,
     return true;
 }
 
+int dpif_offload_stats_get(struct dpif *dpif,
+                           struct netdev_custom_stats **stats_,
+                           size_t *n_stats)
+{
+    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
+    struct netdev_custom_stats *stats;
+    struct dpif_offload *offload;
+    size_t n_providers;
+    int error = 0;
+
+    *n_stats = 0;
+    if (!dp_offload || !dpif_offload_is_offload_enabled()) {
+        *stats_ = NULL;
+        return 0;
+    }
+
+    n_providers = ovs_list_size(&dp_offload->offload_providers);
+    stats = xcalloc(n_providers, sizeof(struct netdev_custom_stats));
+
+    LIST_FOR_EACH (offload, dpif_list_node, &dp_offload->offload_providers) {
+        if (!offload->class->get_global_stats) {
+            continue;
+        }
+
+        error = offload->class->get_global_stats(offload, &stats[(*n_stats)]);
+        if (error) {
+            for (int i = 0; i < *n_stats; i++) {
+                netdev_free_custom_stats_counters(&stats[i]);
+            }
+            *n_stats = 0;
+            free(stats);
+            stats = NULL;
+            break;
+        }
+
+        (*n_stats)++;
+    }
+
+    *stats_ = stats;
+    return error;
+}
+
 bool
 dpif_offload_is_offload_enabled(void)
 {
