@@ -271,6 +271,7 @@ enum sched_assignment_type {
 struct dp_netdev {
     const struct dpif_class *const class;
     const char *const name;
+    const char *const full_name;
     struct ovs_refcount ref_cnt;
     atomic_flag destroyed;
 
@@ -1886,6 +1887,8 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
 
     *CONST_CAST(const struct dpif_class **, &dp->class) = class;
     *CONST_CAST(const char **, &dp->name) = xstrdup(name);
+    *CONST_CAST(const char **, &dp->full_name) = xasprintf("%s@%s",
+                                                           class->type, name);
     ovs_refcount_init(&dp->ref_cnt);
     atomic_flag_clear(&dp->destroyed);
 
@@ -2054,6 +2057,7 @@ dp_netdev_free(struct dp_netdev *dp)
     free(dp->max_sleep_list);
     free(dp->pmd_cmask);
     free(CONST_CAST(char *, dp->name));
+    free(CONST_CAST(char *, dp->full_name));
     free(dp);
 }
 
