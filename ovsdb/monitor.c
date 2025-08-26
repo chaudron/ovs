@@ -1022,6 +1022,7 @@ ovsdb_monitor_compose_row_update(
                                                 &c->column->type));
         }
         if (type & (OJMS_INITIAL | OJMS_INSERT | OJMS_MODIFY)) {
+            ovs_assert(row->new);
             json_object_put(new_json, c->column->name,
                             ovsdb_datum_to_json(&row->new[i],
                                                 &c->column->type));
