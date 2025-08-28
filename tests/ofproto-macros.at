@@ -127,7 +127,7 @@ strip_xids () {
 
 # Changes all 'used:...' to say 'used:0.0', to make output easier to compare.
 strip_used () {
-    sed 's/used:[[0-9]]\.[[0-9]]*/used:0.0/'
+    sed -E 's/used:[[0-9]]+\.[[0-9]]*/used:0.0/'
 }
 
 # Removes all 'duration=...' to make output easier to compare.
