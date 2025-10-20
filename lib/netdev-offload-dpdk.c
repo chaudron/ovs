@@ -60,6 +60,7 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(600, 600);
 
 struct ufid_to_rte_flow_data {
     struct cmap_node node;
+    struct cmap_node mark_node;
     ovs_u128 ufid;
     struct netdev *netdev;
     struct rte_flow *rte_flow;
@@ -68,11 +69,13 @@ struct ufid_to_rte_flow_data {
     struct netdev *physdev;
     struct ovs_mutex lock;
     unsigned int creation_tid;
+    uint32_t flow_mark;
     bool dead;
 };
 
 struct netdev_offload_dpdk_data {
     struct cmap ufid_to_rte_flow;
+    struct cmap mark_to_rte_flow;
     uint64_t *rte_flow_counters;
     struct ovs_mutex map_lock;
 };
@@ -85,6 +88,7 @@ offload_data_init(struct netdev *netdev, unsigned int offload_thread_count)
     data = xzalloc(sizeof *data);
     ovs_mutex_init(&data->map_lock);
     cmap_init(&data->ufid_to_rte_flow);
+    cmap_init(&data->mark_to_rte_flow);
     data->rte_flow_counters = xcalloc(offload_thread_count,
                                       sizeof *data->rte_flow_counters);
 
@@ -124,6 +128,7 @@ offload_data_destroy(struct netdev *netdev)
     }
 
     cmap_destroy(&data->ufid_to_rte_flow);
+    cmap_destroy(&data->mark_to_rte_flow);
     ovsrcu_postpone(offload_data_destroy__, data);
 
     ovsrcu_set(&netdev->hw_info.offload_data, NULL);
@@ -166,6 +171,35 @@ offload_data_map(struct netdev *netdev)
         ovsrcu_get(void *, &netdev->hw_info.offload_data);
 
     return data ? &data->ufid_to_rte_flow : NULL;
+}
+
+static bool
+offload_data_maps(struct netdev *netdev, struct cmap **ufid_map,
+                  struct cmap **mark_map)
+{
+    struct netdev_offload_dpdk_data *data;
+
+    data = (struct netdev_offload_dpdk_data *)
+        ovsrcu_get(void *, &netdev->hw_info.offload_data);
+
+    if (!data) {
+        return false;
+    }
+
+    *ufid_map = &data->ufid_to_rte_flow;
+    *mark_map = &data->mark_to_rte_flow;
+    return true;
+}
+
+static struct cmap *
+offload_data_mark_map(struct netdev *netdev)
+{
+    struct netdev_offload_dpdk_data *data;
+
+    data = (struct netdev_offload_dpdk_data *)
+        ovsrcu_get(void *, &netdev->hw_info.offload_data);
+
+    return data ? &data->mark_to_rte_flow : NULL;
 }
 
 /* Find rte_flow with @ufid. */
@@ -213,17 +247,38 @@ ufid_to_rte_flow_data_find_protected(struct netdev *netdev,
     return NULL;
 }
 
+/* Find rte_flow with @flow_mark. */
+static struct ufid_to_rte_flow_data *
+mark_to_rte_flow_data_find(struct netdev *netdev, uint32_t flow_mark)
+{
+    size_t hash = hash_int(flow_mark, 0);
+    struct ufid_to_rte_flow_data *data;
+    struct cmap *mark_map = offload_data_mark_map(netdev);
+
+    if (!mark_map) {
+        return NULL;
+    }
+
+    CMAP_FOR_EACH_WITH_HASH (data, mark_node, hash, mark_map) {
+        if (data->flow_mark == flow_mark) {
+            return data;
+        }
+    }
+    return NULL;
+}
+
 static inline struct ufid_to_rte_flow_data *
 ufid_to_rte_flow_associate(const ovs_u128 *ufid, struct netdev *netdev,
                            struct netdev *physdev, struct rte_flow *rte_flow,
-                           bool actions_offloaded)
+                           bool actions_offloaded, uint32_t flow_mark)
 {
     size_t hash = hash_bytes(ufid, sizeof *ufid, 0);
-    struct cmap *map = offload_data_map(netdev);
     struct ufid_to_rte_flow_data *data_prev;
     struct ufid_to_rte_flow_data *data;
+    struct cmap *map, *mark_map;
 
-    if (!map) {
+
+    if (!offload_data_maps(netdev, &map, &mark_map)) {
         return NULL;
     }
 
@@ -248,9 +303,12 @@ ufid_to_rte_flow_associate(const ovs_u128 *ufid, struct netdev *netdev,
     data->rte_flow = rte_flow;
     data->actions_offloaded = actions_offloaded;
     data->creation_tid = dpdk_offload_thread_id();
+    data->flow_mark = flow_mark;
     ovs_mutex_init(&data->lock);
 
     cmap_insert(map, CONST_CAST(struct cmap_node *, &data->node), hash);
+    cmap_insert(mark_map, CONST_CAST(struct cmap_node *, &data->mark_node),
+                hash_int(flow_mark, 0));
 
     offload_data_unlock(netdev);
     return data;
@@ -268,14 +326,16 @@ ufid_to_rte_flow_disassociate(struct ufid_to_rte_flow_data *data)
     OVS_REQUIRES(data->lock)
 {
     size_t hash = hash_bytes(&data->ufid, sizeof data->ufid, 0);
-    struct cmap *map = offload_data_map(data->netdev);
+    struct cmap *map, *mark_map;
 
-    if (!map) {
+    if (!offload_data_maps(data->netdev, &map, &mark_map)) {
         return;
     }
 
     offload_data_lock(data->netdev);
     cmap_remove(map, CONST_CAST(struct cmap_node *, &data->node), hash);
+    cmap_remove(mark_map, CONST_CAST(struct cmap_node *, &data->mark_node),
+                hash_int(data->flow_mark, 0));
     offload_data_unlock(data->netdev);
 
     if (data->netdev != data->physdev) {
@@ -2348,7 +2408,8 @@ netdev_offload_dpdk_add_flow(struct dpif_offload_dpdk *offload,
         goto out;
     }
     flows_data = ufid_to_rte_flow_associate(ufid, netdev, patterns.physdev,
-                                            flow, actions_offloaded);
+                                            flow, actions_offloaded,
+                                            flow_mark);
     VLOG_DBG("%s/%s: installed flow %p by ufid "UUID_FMT,
              netdev_get_name(netdev), netdev_get_name(patterns.physdev), flow,
              UUID_ARGS((struct uuid *) ufid));
@@ -2701,15 +2762,26 @@ get_vport_netdev(struct dpif_offload_dpdk *offload,
 
 int netdev_offload_dpdk_hw_miss_packet_recover(
     struct dpif_offload_dpdk *offload, struct netdev *netdev,
-    struct dp_packet *packet)
+    struct dp_packet *packet, ovs_u128 **ufid)
 {
     struct rte_flow_restore_info rte_restore_info;
+    struct ufid_to_rte_flow_data *data = NULL;
     struct rte_flow_tunnel *rte_tnl;
     struct netdev *vport_netdev;
     struct pkt_metadata *md;
     struct flow_tnl *md_tnl;
     odp_port_t vport_odp;
+    uint32_t flow_mark;
     int ret = 0;
+
+    if (dp_packet_has_flow_mark(packet, &flow_mark)) {
+        data = mark_to_rte_flow_data_find(netdev, flow_mark);
+    }
+    if (data) {
+        *ufid = &data->ufid;
+    } else {
+        *ufid = NULL;
+    }
 
     ret = netdev_dpdk_rte_flow_get_restore_info(netdev, packet,
                                                 &rte_restore_info, NULL);
