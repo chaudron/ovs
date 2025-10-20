@@ -1419,8 +1419,7 @@ dpif_offload_netdev_same_offload(const struct netdev *a,
 
 int
 dpif_offload_datapath_flow_put(const char *dpif_name,
-                               struct dpif_offload_flow_put *put,
-                               uint32_t *flow_mark)
+                               struct dpif_offload_flow_put *put)
 {
     struct dpif_offload *offload;
     struct dp_offload *dp_offload;
@@ -1432,9 +1431,6 @@ dpif_offload_datapath_flow_put(const char *dpif_name,
     ovs_mutex_unlock(&dpif_offload_mutex);
 
     if (OVS_UNLIKELY(!dp_offload)) {
-        if (flow_mark) {
-            *flow_mark = INVALID_FLOW_MARK;
-        }
         return 0;
     }
 
@@ -1442,20 +1438,15 @@ dpif_offload_datapath_flow_put(const char *dpif_name,
                                                  put->in_port);
 
     if (OVS_LIKELY(netdev && offload->class->netdev_flow_put)) {
-        return offload->class->netdev_flow_put(offload, netdev, put,
-                                               flow_mark);
+        return offload->class->netdev_flow_put(offload, netdev, put);
     }
 
-    if (flow_mark) {
-        *flow_mark = INVALID_FLOW_MARK;
-    }
     return 0;
 }
 
 int
 dpif_offload_datapath_flow_del(const char *dpif_name,
-                               struct dpif_offload_flow_del *del,
-                               uint32_t *flow_mark)
+                               struct dpif_offload_flow_del *del)
 {
     struct dpif_offload *offload;
     struct dp_offload *dp_offload;
@@ -1467,9 +1458,6 @@ dpif_offload_datapath_flow_del(const char *dpif_name,
     ovs_mutex_unlock(&dpif_offload_mutex);
 
     if (OVS_UNLIKELY(!dp_offload)) {
-        if (flow_mark) {
-            *flow_mark = INVALID_FLOW_MARK;
-        }
         return 0;
     }
 
@@ -1477,13 +1465,9 @@ dpif_offload_datapath_flow_del(const char *dpif_name,
                                                  del->in_port);
 
     if (OVS_LIKELY(netdev && offload->class->netdev_flow_del)) {
-        return offload->class->netdev_flow_del(offload, netdev, del,
-                                               flow_mark);
+        return offload->class->netdev_flow_del(offload, netdev, del);
     }
 
-    if (flow_mark) {
-        *flow_mark = INVALID_FLOW_MARK;
-    }
     return 0;
 }
 
@@ -1522,7 +1506,8 @@ dpif_offload_datapath_flow_stats(const char *dpif_name, odp_port_t in_port,
 
 int
 dpif_offload_netdev_hw_miss_packet_postprocess(struct netdev *netdev,
-                                               struct dp_packet *packet)
+                                               struct dp_packet *packet,
+                                               ovs_u128 **ufid)
 {
     const struct dpif_offload *offload;
     bool postprocess_api_supported;
@@ -1547,7 +1532,7 @@ dpif_offload_netdev_hw_miss_packet_postprocess(struct netdev *netdev,
     }
 
     rc = offload->class->netdev_hw_miss_packet_postprocess(offload, netdev,
-                                                           packet);
+                                                           packet, ufid);
     if (rc == EOPNOTSUPP) {
         /* API unsupported by the port; avoid subsequent calls. */
         atomic_store_relaxed(&netdev->hw_info.postprocess_api_supported, false);

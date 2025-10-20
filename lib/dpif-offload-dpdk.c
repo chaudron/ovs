@@ -100,6 +100,8 @@ struct dpif_offload_dpdk {
     atomic_bool offload_thread_shutdown;
     struct dpdk_offload_thread *offload_threads;
 
+    struct id_fpool *flow_mark_pool;
+
     /* Configuration specific variables. */
     struct ovsthread_once once_enable; /* Track first-time enablement. */
     unsigned int offload_thread_count; /* Number of offload threads. */
@@ -114,6 +116,40 @@ dpif_offload_dpdk_cast(const struct dpif_offload *offload)
 
 DECLARE_EXTERN_PER_THREAD_DATA(unsigned int, dpdk_offload_thread_id);
 DEFINE_EXTERN_PER_THREAD_DATA(dpdk_offload_thread_id, OVSTHREAD_ID_UNSET);
+
+static uint32_t
+dpif_offload_dpdk_allocate_flow_mark(struct dpif_offload_dpdk *offload)
+{
+    static struct ovsthread_once init_once = OVSTHREAD_ONCE_INITIALIZER;
+    unsigned int uid = dpdk_offload_thread_id() \
+                       % offload->offload_thread_count;
+    uint32_t flow_mark;
+
+    if (ovsthread_once_start(&init_once)) {
+        /* Haven't initiated yet, do it here. */
+        offload->flow_mark_pool = id_fpool_create(
+            offload->offload_thread_count, 1, UINT32_MAX - 1);
+        ovsthread_once_done(&init_once);
+    }
+
+    if (id_fpool_new_id(offload->flow_mark_pool, uid, &flow_mark)) {
+        return flow_mark;
+    }
+
+    return INVALID_FLOW_MARK;
+}
+
+static void
+dpif_offload_dpdk_free_flow_mark(struct dpif_offload_dpdk *offload,
+                                 uint32_t flow_mark)
+{
+    if (flow_mark != INVALID_FLOW_MARK) {
+        unsigned int uid = dpdk_offload_thread_id() \
+                           % offload->offload_thread_count;
+
+        id_fpool_free_id(offload->flow_mark_pool, uid, flow_mark);
+    }
+}
 
 unsigned int
 dpdk_offload_thread_id(void)
@@ -312,7 +348,7 @@ dpif_offload_dpdk_offload_del(struct dpdk_offload_thread *thread,
                               struct dpdk_offload_thread_item *item)
 {
     struct dpdk_offload_flow_item *flow = &item->data->flow;
-    uint32_t mark = INVALID_FLOW_MARK;
+    uint32_t mark;
     struct dpif_flow_stats stats;
     struct netdev *netdev;
     int error = 0;
@@ -334,13 +370,14 @@ dpif_offload_dpdk_offload_del(struct dpdk_offload_thread *thread,
         error = netdev_offload_dpdk_flow_del(netdev, &flow->ufid,
                                              flow->requested_stats ? &stats
                                                                    : NULL);
+        dpif_offload_dpdk_free_flow_mark(thread->offload, mark);
     }
 
 do_callback:
     dpif_offload_datapath_flow_op_continue(&flow->callback,
                                            flow->requested_stats ? &stats
                                                                  : NULL,
-                                           mark, error);
+                                           error);
     return error;
 }
 
@@ -368,7 +405,7 @@ dpif_offload_dpdk_offload_put(struct dpdk_offload_thread *thread,
             goto do_callback;
         }
 
-        mark = dpif_offload_allocate_flow_mark();
+        mark = dpif_offload_dpdk_allocate_flow_mark(thread->offload);
         if (mark == INVALID_FLOW_MARK) {
             VLOG_ERR("Failed to allocate flow mark!");
             error = ENOSPC;
@@ -407,15 +444,14 @@ do_callback:
             }
         } else if (mark != INVALID_FLOW_MARK) {
             /* We allocated a mark, but it was not used. */
-            dpif_offload_free_flow_mark(mark);
-            mark = INVALID_FLOW_MARK;
+            dpif_offload_dpdk_free_flow_mark(thread->offload, mark);
         }
     }
 
     dpif_offload_datapath_flow_op_continue(&flow->callback,
                                             flow->requested_stats ? &stats
                                                                   : NULL,
-                                            mark, error);
+                                            error);
     return error;
 }
 
@@ -795,6 +831,7 @@ dpif_offload_dpdk_open(const struct dpif_offload_class *offload_class,
     offload->offload_threads = NULL;
     atomic_count_init(&offload->next_offload_thread_id, 0);
     atomic_init(&offload->offload_thread_shutdown, false);
+    offload->flow_mark_pool = NULL;
 
     *offload_ = &offload->offload;
     return 0;
@@ -819,8 +856,6 @@ dpif_offload_dpdk_close(struct dpif_offload *offload_)
                                          dpif_offload_dpdk_cleanup_port,
                                          offload_);
 
-    dpif_offload_port_mgr_uninit(offload->port_mgr);
-
     atomic_store_relaxed(&offload->offload_thread_shutdown, true);
     if (offload->offload_threads) {
         for (int i = 0; i < offload->offload_thread_count; i++) {
@@ -829,6 +864,12 @@ dpif_offload_dpdk_close(struct dpif_offload *offload_)
             cmap_destroy(&offload->offload_threads[i].megaflow_to_mark);
         }
     }
+
+    dpif_offload_port_mgr_uninit(offload->port_mgr);
+    if (offload->flow_mark_pool) {
+        id_fpool_destroy(offload->flow_mark_pool);
+    }
+
     free(offload);
 }
 
@@ -1020,19 +1061,18 @@ dpif_offload_dpdk_get_n_offloaded_by_thread(struct dpif_offload_dpdk *offload,
 static int
 dpif_offload_dpdk_netdev_hw_miss_packet_postprocess(
     const struct dpif_offload *offload_, struct netdev *netdev,
-    struct dp_packet *packet)
-
+    struct dp_packet *packet, ovs_u128 **ufid)
 {
     struct dpif_offload_dpdk *offload = dpif_offload_dpdk_cast(offload_);
 
-    return netdev_offload_dpdk_hw_miss_packet_recover(offload, netdev, packet);
+    return netdev_offload_dpdk_hw_miss_packet_recover(offload, netdev, packet,
+                                                      ufid);
 }
 
 static int
 dpif_offload_dpdk_netdev_flow_put(const struct dpif_offload *offload_,
                                   struct netdev *netdev OVS_UNUSED,
-                                  struct dpif_offload_flow_put *put,
-                                  uint32_t *flow_mark)
+                                  struct dpif_offload_flow_put *put)
 {
     struct dpif_offload_dpdk *offload = dpif_offload_dpdk_cast(offload_);
     struct dpdk_offload_thread_item *item;
@@ -1055,16 +1095,13 @@ dpif_offload_dpdk_netdev_flow_put(const struct dpif_offload *offload_,
     flow_offload->callback = put->cb_data;
 
     dpif_offload_dpdk_offload_flow_enqueue(offload, item);
-
-    *flow_mark = INVALID_FLOW_MARK;
     return EINPROGRESS;
 }
 
 static int
 dpif_offload_dpdk_netdev_flow_del(const struct dpif_offload *offload_,
                                   struct netdev *netdev OVS_UNUSED,
-                                  struct dpif_offload_flow_del *del,
-                                  uint32_t *flow_mark)
+                                  struct dpif_offload_flow_del *del)
 {
     struct dpif_offload_dpdk *offload = dpif_offload_dpdk_cast(offload_);
     struct dpdk_offload_thread_item *item;
@@ -1081,8 +1118,6 @@ dpif_offload_dpdk_netdev_flow_del(const struct dpif_offload *offload_,
     flow_offload->callback = del->cb_data;
 
     dpif_offload_dpdk_offload_flow_enqueue(offload, item);
-
-    *flow_mark = INVALID_FLOW_MARK;
     return EINPROGRESS;
 }
 

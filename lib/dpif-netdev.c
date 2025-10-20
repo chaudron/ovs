@@ -121,9 +121,7 @@ COVERAGE_DEFINE(datapath_drop_invalid_port);
 COVERAGE_DEFINE(datapath_drop_invalid_bond);
 COVERAGE_DEFINE(datapath_drop_invalid_tnl_port);
 COVERAGE_DEFINE(datapath_drop_rx_invalid_packet);
-#ifdef ALLOW_EXPERIMENTAL_API /* Packet restoration API required. */
 COVERAGE_DEFINE(datapath_drop_hw_miss_postprocess);
-#endif
 
 /* Protects against changes to 'dp_netdevs'. */
 struct ovs_mutex dp_netdev_mutex = OVS_MUTEX_INITIALIZER;
@@ -290,9 +288,9 @@ struct dp_netdev {
     struct ovs_mutex meters_lock;
     struct cmap meters OVS_GUARDED;
 
-    /* Flow Mark to flow mapping. */
-    struct ovs_mutex mark_to_flow_lock;
-    struct cmap mark_to_flow OVS_GUARDED;
+    /* Flow mega ufid to flow mapping. */
+    struct ovs_mutex mufid_to_flow_lock;
+    struct cmap mufid_to_flow OVS_GUARDED;
 
     /* Probability of EMC insertions is a factor of 'emc_insert_min'.*/
     atomic_uint32_t emc_insert_min;
@@ -1815,9 +1813,9 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
     cmap_init(&dp->meters);
     ovs_mutex_init(&dp->meters_lock);
 
-    /* Init flow mark resources. */
-    cmap_init(&dp->mark_to_flow);
-    ovs_mutex_init(&dp->mark_to_flow_lock);
+    /* Initialize mega ufid-to-flow mapping resources. */
+    cmap_init(&dp->mufid_to_flow);
+    ovs_mutex_init(&dp->mufid_to_flow_lock);
 
     /* Disable upcalls by default. */
     dp_netdev_disable_upcall(dp);
@@ -1961,8 +1959,8 @@ dp_netdev_free(struct dp_netdev *dp)
     cmap_destroy(&dp->tx_bonds);
     ovs_mutex_destroy(&dp->bond_mutex);
 
-    cmap_destroy(&dp->mark_to_flow);
-    ovs_mutex_destroy(&dp->mark_to_flow_lock);
+    cmap_destroy(&dp->mufid_to_flow);
+    ovs_mutex_destroy(&dp->mufid_to_flow_lock);
 
     /* Upcalls must be disabled at this point */
     dp_netdev_destroy_upcall_lock(dp);
@@ -2413,31 +2411,29 @@ dp_netdev_pmd_find_dpcls(struct dp_netdev_pmd_thread *pmd,
 
 /* Associate mark with a flow, which is 1:N mapping */
 static void
-mark_to_flow_associate(struct dp_netdev *dp, const uint32_t mark,
-                       struct dp_netdev_flow *flow)
+mufid_to_flow_associate(struct dp_netdev *dp, struct dp_netdev_flow *flow)
 {
     dp_netdev_flow_ref(flow);
 
-    ovs_mutex_lock(&dp->mark_to_flow_lock);
-    cmap_insert(&dp->mark_to_flow,
-                CONST_CAST(struct cmap_node *, &flow->mark_node),
-                hash_int(mark, 0));
-    ovs_mutex_unlock(&dp->mark_to_flow_lock);
+    ovs_mutex_lock(&dp->mufid_to_flow_lock);
+    cmap_insert(&dp->mufid_to_flow,
+                CONST_CAST(struct cmap_node *, &flow->mufid_node),
+                dp_netdev_flow_hash(&flow->mega_ufid));
+    flow->offloaded = true;
+    ovs_mutex_unlock(&dp->mufid_to_flow_lock);
 
-    flow->mark = mark;
-
-    VLOG_DBG("Associated dp_netdev flow %p with mark %u mega_ufid "UUID_FMT,
-             flow, mark, UUID_ARGS((struct uuid *) &flow->mega_ufid));
+    VLOG_DBG("Associated dp_netdev flow %p with mega_ufid "UUID_FMT,
+             flow, UUID_ARGS((struct uuid *) &flow->mega_ufid));
 }
 
 static bool
-flow_mark_has_no_ref(struct dp_netdev *dp, uint32_t mark)
+mufid_has_no_references(struct dp_netdev *dp, const ovs_u128 *ufid)
 {
     struct dp_netdev_flow *flow;
 
-    CMAP_FOR_EACH_WITH_HASH (flow, mark_node, hash_int(mark, 0),
-                             &dp->mark_to_flow) {
-        if (flow->mark == mark) {
+    CMAP_FOR_EACH_WITH_HASH (flow, mufid_node, dp_netdev_flow_hash(ufid),
+                             &dp->mufid_to_flow) {
+        if (flow->offloaded && ovs_u128_equals(flow->mega_ufid, *ufid)) {
             return false;
         }
     }
@@ -2446,59 +2442,57 @@ flow_mark_has_no_ref(struct dp_netdev *dp, uint32_t mark)
 }
 
 static void
-mark_to_flow_disassociate(struct dp_netdev *dp, struct dp_netdev_flow *flow)
+mufid_to_flow_disassociate(struct dp_netdev *dp, struct dp_netdev_flow *flow)
 {
-    uint32_t mark = flow->mark;
-
-    if (OVS_UNLIKELY(mark == INVALID_FLOW_MARK)) {
+    if (OVS_UNLIKELY(!flow->offloaded)) {
         return;
     }
 
-    flow->mark = INVALID_FLOW_MARK;
-
-    ovs_mutex_lock(&dp->mark_to_flow_lock);
-    cmap_remove(&dp->mark_to_flow,
-                CONST_CAST(struct cmap_node *, &flow->mark_node),
-                hash_int(mark, 0));
-    ovs_mutex_unlock(&dp->mark_to_flow_lock);
+    ovs_mutex_lock(&dp->mufid_to_flow_lock);
+    flow->offloaded = false;
+    cmap_remove(&dp->mufid_to_flow,
+                CONST_CAST(struct cmap_node *, &flow->mufid_node),
+                dp_netdev_flow_hash(&flow->mega_ufid));
+    ovs_mutex_unlock(&dp->mufid_to_flow_lock);
 
     dp_netdev_flow_unref(flow);
 }
 
 static void
-mark_to_flow_disassociate_all(struct dp_netdev *dp, const uint32_t mark)
+mufid_to_flow_disassociate_all(struct dp_netdev *dp, const ovs_u128 *ufid)
 {
-    size_t hash = hash_int(mark, 0);
+    size_t hash = dp_netdev_flow_hash(ufid);
     struct dp_netdev_flow *flow;
 
-    if (OVS_UNLIKELY(mark == INVALID_FLOW_MARK)) {
-        return;
-    }
+    ovs_mutex_lock(&dp->mufid_to_flow_lock);
+    CMAP_FOR_EACH_WITH_HASH (flow, mufid_node, hash, &dp->mufid_to_flow) {
+            if (flow->offloaded && ovs_u128_equals(flow->mega_ufid, *ufid)) {
+                flow->offloaded = false;
+                cmap_remove(&dp->mufid_to_flow,
+                            CONST_CAST(struct cmap_node *, &flow->mufid_node),
+                            hash);
 
-    ovs_mutex_lock(&dp->mark_to_flow_lock);
-    CMAP_FOR_EACH_WITH_HASH (flow, mark_node, hash, &dp->mark_to_flow) {
-            if (flow->mark == mark) {
-                flow->mark = INVALID_FLOW_MARK;
-                cmap_remove(&dp->mark_to_flow,
-                            CONST_CAST(struct cmap_node *, &flow->mark_node),
-                            hash_int(mark, 0));
                 dp_netdev_flow_unref(flow);
             }
     }
-    ovs_mutex_unlock(&dp->mark_to_flow_lock);
+    ovs_mutex_unlock(&dp->mufid_to_flow_lock);
 }
 
 static struct dp_netdev_flow *
-mark_to_flow_find(const struct dp_netdev_pmd_thread *pmd,
-                  const uint32_t mark)
+mufid_to_flow_find(const struct dp_netdev_pmd_thread *pmd,
+                   const ovs_u128 *ufid)
 {
     struct dp_netdev_flow *flow;
 
-    CMAP_FOR_EACH_WITH_HASH (flow, mark_node, hash_int(mark, 0),
-                             &pmd->dp->mark_to_flow) {
+    if (!ufid) {
+        return NULL;
+    }
 
-        if (flow->mark == mark && flow->pmd_id == pmd->core_id &&
-            flow->dead == false) {
+    CMAP_FOR_EACH_WITH_HASH (flow, mufid_node, dp_netdev_flow_hash(ufid),
+                             &pmd->dp->mufid_to_flow) {
+
+        if (flow->offloaded && ovs_u128_equals(flow->mega_ufid, *ufid)
+            && flow->pmd_id == pmd->core_id && !flow->dead) {
             return flow;
         }
     }
@@ -2571,21 +2565,19 @@ log_netdev_flow_change(const struct dp_netdev_flow *flow,
 }
 
 static void
-offload_flow_del_resume(int error, uint32_t flow_mark)
+offload_flow_del_resume(int error)
 {
     if (error == EINPROGRESS) {
         return;
     }
-    dpif_offload_free_flow_mark(flow_mark);
+    /* Currently there is no work to be done on flow deletion. */
 }
 
 static void
 offload_flow_del_resume_cb(void *aux_dp OVS_UNUSED, void *aux_flow OVS_UNUSED,
-                           struct dpif_flow_stats *stats OVS_UNUSED,
-                           uint32_t flow_mark,
-                           int error)
+                           struct dpif_flow_stats *stats OVS_UNUSED, int error)
 {
-    offload_flow_del_resume(error, flow_mark);
+    offload_flow_del_resume(error);
 }
 
 static void
@@ -2593,13 +2585,13 @@ offload_flow_del(struct dp_netdev *dp, struct dp_netdev_flow *flow)
 {
     odp_port_t in_port = flow->flow.in_port.odp_port;
 
-    if (flow->mark == INVALID_FLOW_MARK) {
+    if (!flow->offloaded) {
         return;
     }
 
-    mark_to_flow_disassociate(dp, flow);
+    mufid_to_flow_disassociate(dp, flow);
 
-    if (flow_mark_has_no_ref(dp, flow->mark)
+    if (mufid_has_no_references(dp, &flow->mega_ufid)
         && dpif_offload_is_offload_enabled()) {
         struct dpif_offload_flow_del del = {
             .in_port = in_port,
@@ -2607,16 +2599,15 @@ offload_flow_del(struct dp_netdev *dp, struct dp_netdev_flow *flow)
             .stats = NULL,
             .cb_data = { .callback=offload_flow_del_resume_cb },
         };
-        uint32_t mark;
         int ret;
 
-        ret = dpif_offload_datapath_flow_del(dp->full_name, &del, &mark);
+        ret = dpif_offload_datapath_flow_del(dp->full_name, &del);
         if (ret && ret != EINPROGRESS) {
             VLOG_DBG("Failed removing offload flow ufid "UUID_FMT
                      " from port %d",
                      UUID_ARGS((struct uuid *)&flow->mega_ufid), in_port);
         }
-        offload_flow_del_resume(ret, mark);
+        offload_flow_del_resume(ret);
     }
 }
 
@@ -3478,8 +3469,7 @@ dp_netdev_flow_is_simple_match(const struct match *match)
 }
 
 static void
-offload_flow_put_resume(struct dp_netdev *dp,
-                        struct dp_netdev_flow *flow, uint32_t flow_mark,
+offload_flow_put_resume(struct dp_netdev *dp, struct dp_netdev_flow *flow,
                         int error)
 {
     if (error == EINPROGRESS) {
@@ -3487,29 +3477,21 @@ offload_flow_put_resume(struct dp_netdev *dp,
     }
 
     if (!error) {
-        if (flow_mark != INVALID_FLOW_MARK) {
-            if (flow->mark == INVALID_FLOW_MARK) {
-                mark_to_flow_associate(dp, flow_mark, flow);
-            } else if (flow->mark != flow_mark) {
-                /* The flow mark has changed. */
-                mark_to_flow_disassociate_all(dp, flow->mark);
-                dpif_offload_free_flow_mark(flow->mark);
-                mark_to_flow_associate(dp, flow_mark, flow);
-            }
+        if (!flow->offloaded) {
+            mufid_to_flow_associate(dp, flow);
+        }
 
-            if (flow->dead) {
-                /* If flows are processed asynchronously, modifications might
-                 * still be queued up while the flow is being removed. In this
-                 * case we need to go through the delete process here. */
-                offload_flow_del(dp, flow);
-            }
+        if (flow->dead) {
+            /* If flows are processed asynchronously, modifications might
+            * still be queued up while the flow is being removed. In this
+            * case we need to go through the delete process here. */
+            offload_flow_del(dp, flow);
         }
     } else {
-        /* On error, no flow should be associated with this flow mark,
-         * and we should free it. */
-        if (flow->mark != INVALID_FLOW_MARK) {
-            mark_to_flow_disassociate_all(dp, flow_mark);
-            dpif_offload_free_flow_mark(flow_mark);
+        /* On error, no flows should be associated with this mega_ufid offload,
+         * so disassociate all dp_flow structures. */
+        if (flow->offloaded) {
+            mufid_to_flow_disassociate_all(dp, &flow->mega_ufid);
         }
     }
     dp_netdev_flow_unref(flow);
@@ -3517,14 +3499,12 @@ offload_flow_put_resume(struct dp_netdev *dp,
 
 static void
 offload_flow_put_resume_cb(void *aux_dp, void *aux_flow,
-                           struct dpif_flow_stats *stats OVS_UNUSED,
-                           uint32_t flow_mark,
-                           int error)
+                           struct dpif_flow_stats *stats OVS_UNUSED, int error)
 {
     struct dp_netdev *dp = aux_dp;
     struct dp_netdev_flow *flow = aux_flow;
 
-    offload_flow_put_resume(dp, flow, flow_mark, error);
+    offload_flow_put_resume(dp, flow, error);
 }
 
 static void
@@ -3545,7 +3525,6 @@ offload_flow_put(struct dp_netdev *dp, struct dp_netdev_flow *flow,
                      .callback_aux_dp = dp,
                      .callback_aux_flow = flow },
         };
-    uint32_t flow_mark;
     int error;
 
     if (!dpif_offload_is_offload_enabled()) {
@@ -3553,9 +3532,8 @@ offload_flow_put(struct dp_netdev *dp, struct dp_netdev_flow *flow,
     }
 
     dp_netdev_flow_ref(flow);
-    error = dpif_offload_datapath_flow_put(dp->full_name, &put,
-                                           &flow_mark);
-    offload_flow_put_resume(dp, flow, flow_mark, error);
+    error = dpif_offload_datapath_flow_put(dp->full_name, &put);
+    offload_flow_put_resume(dp, flow, error);
 }
 
 static struct dp_netdev_flow *
@@ -3595,8 +3573,8 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
     flow = xmalloc(sizeof *flow - sizeof flow->cr.flow.mf + mask.len);
     memset(&flow->stats, 0, sizeof flow->stats);
     flow->dead = false;
+    flow->offloaded = false;
     flow->batch = NULL;
-    flow->mark = INVALID_FLOW_MARK;
     flow->orig_in_port = orig_in_port;
     *CONST_CAST(unsigned *, &flow->pmd_id) = pmd->core_id;
     *CONST_CAST(struct flow *, &flow->flow) = match->flow;
@@ -7731,35 +7709,30 @@ dp_netdev_hw_flow(const struct dp_netdev_pmd_thread *pmd,
                   struct dp_packet *packet,
                   struct dp_netdev_flow **flow)
 {
-    uint32_t mark;
-
-#ifdef ALLOW_EXPERIMENTAL_API /* Packet restoration API required. */
-    /* Restore the packet if HW processing was terminated before completion. */
     struct dp_netdev_rxq *rxq = pmd->ctx.last_rxq;
     bool postprocess_api_supported;
+    ovs_u128 *ufid;
+    int err;
 
     atomic_read_relaxed(&rxq->port->netdev->hw_info.postprocess_api_supported,
                         &postprocess_api_supported);
-    if (postprocess_api_supported) {
-        int err = dpif_offload_netdev_hw_miss_packet_postprocess(
-            rxq->port->netdev, packet);
 
-        if (err && err != EOPNOTSUPP) {
-            if (err != ECANCELED) {
-                COVERAGE_INC(datapath_drop_hw_miss_postprocess);
-            }
-            return -1;
-        }
-    }
-#endif
-
-    /* If no mark, no flow to find. */
-    if (!dp_packet_has_flow_mark(packet, &mark)) {
+    if (!postprocess_api_supported) {
         *flow = NULL;
         return 0;
     }
 
-    *flow = mark_to_flow_find(pmd, mark);
+    err = dpif_offload_netdev_hw_miss_packet_postprocess(rxq->port->netdev,
+                                                         packet, &ufid);
+
+    if (err && err != EOPNOTSUPP) {
+        if (err != ECANCELED) {
+            COVERAGE_INC(datapath_drop_hw_miss_postprocess);
+        }
+        return -1;
+    }
+
+    *flow = mufid_to_flow_find(pmd, ufid);
     return 0;
 }
 
