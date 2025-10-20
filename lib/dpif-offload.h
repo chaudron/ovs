@@ -155,13 +155,13 @@ int dpif_offload_stats_get(struct dpif *, struct netdev_custom_stats **stats,
 bool dpif_offload_netdev_same_offload(const struct netdev *,
                                       const struct netdev *);
 int dpif_offload_netdev_hw_miss_packet_postprocess(struct netdev *,
-                                                   struct dp_packet *);
+                                                   struct dp_packet *,
+                                                   ovs_u128 **ufid);
 
 
 /* Flow modification callback definitions. */
 typedef void dpif_offload_flow_op_cb(void *aux_dp, void *aux_flow,
-                                     struct dpif_flow_stats *stats,
-                                     uint32_t flow_mark, int error);
+                                     struct dpif_flow_stats *stats, int error);
 
 /* Supporting structures for flow modification functions. */
 struct dpif_offload_flow_cb_data {
@@ -191,11 +191,9 @@ struct dpif_offload_flow_del {
 
 /* Flow modification functions, which can be used in the fast path. */
 int dpif_offload_datapath_flow_put(const char *dpif_name,
-                                   struct dpif_offload_flow_put *,
-                                   uint32_t *flow_mark);
+                                   struct dpif_offload_flow_put *);
 int dpif_offload_datapath_flow_del(const char *dpif_name,
-                                   struct dpif_offload_flow_del *,
-                                   uint32_t *flow_mark);
+                                   struct dpif_offload_flow_del *);
 bool dpif_offload_datapath_flow_stats(const char *dpif_name,
                                       odp_port_t in_port, const ovs_u128 *ufid,
                                       struct dpif_flow_stats *,
@@ -203,11 +201,10 @@ bool dpif_offload_datapath_flow_stats(const char *dpif_name,
 
 static inline void dpif_offload_datapath_flow_op_continue(
     struct dpif_offload_flow_cb_data *cb, struct dpif_flow_stats *stats,
-    uint32_t flow_mark, int error)
+    int error)
 {
     if (cb && cb->callback) {
-        cb->callback(cb->callback_aux_dp, cb->callback_aux_flow,
-                      stats, flow_mark, error);
+        cb->callback(cb->callback_aux_dp, cb->callback_aux_flow, stats, error);
     }
 }
 
