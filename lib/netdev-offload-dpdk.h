@@ -34,7 +34,8 @@ uint64_t netdev_offload_dpdk_flow_get_n_offloaded_by_thread(
     struct netdev *, unsigned int tid);
 int netdev_offload_dpdk_hw_miss_packet_recover(struct dpif_offload_dpdk *,
                                                struct netdev *,
-                                               struct dp_packet *);
+                                               struct dp_packet *,
+                                               ovs_u128 **ufid);
 int netdev_offload_dpdk_flow_put(struct dpif_offload_dpdk *,
                                  struct netdev *, struct match *,
                                  struct nlattr *actions, size_t actions_len,
