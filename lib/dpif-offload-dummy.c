@@ -17,6 +17,7 @@
 #include <config.h>
 #include <errno.h>
 
+#include "coverage.h"
 #include "dpif.h"
 #include "dpif-offload.h"
 #include "dpif-offload-provider.h"
@@ -32,6 +33,8 @@
 #include "openvswitch/vlog.h"
 
 VLOG_DEFINE_THIS_MODULE(dpif_offload_dummy);
+
+COVERAGE_DEFINE(dummy_offload_do_work);
 
 struct pmd_id_data {
     struct hmap_node node;
@@ -784,6 +787,40 @@ dummy_netdev_simulate_offload(struct netdev *netdev, struct dp_packet *packet,
     ovs_mutex_unlock(&port->port_mutex);
 }
 
+static void
+dummy_pmd_thread_work_cb(unsigned core_id OVS_UNUSED, int numa_id OVS_UNUSED,
+                         void *ctx OVS_UNUSED)
+{
+    COVERAGE_INC(dummy_offload_do_work);
+}
+
+static void
+dummy_pmd_thread_lifecycle(const struct dpif_offload *dpif_offload,
+                           bool exit, unsigned core_id, int numa_id,
+                           dpif_offload_pmd_thread_work_cb **callback,
+                           void **ctx)
+{
+    /* Only do this for the 'dummy' class, not for 'dummy_x'. */
+    if (strcmp(dpif_offload_type(dpif_offload), "dummy")) {
+        *callback = NULL;
+        *ctx = NULL;
+        return;
+    }
+
+    VLOG_DBG(
+        "pmd_thread_lifecycle; exit=%s, core=%u, numa=%d, cb=%p, ctx=%p",
+        exit ? "true" : "false", core_id, numa_id, *callback, *ctx);
+
+    ovs_assert(!*callback || *callback == dummy_pmd_thread_work_cb);
+
+    if (exit) {
+        free(*ctx);
+    } else {
+        *ctx = *ctx ? *ctx : xstrdup("DUMMY_OFFLOAD_WORK");
+        *callback = dummy_pmd_thread_work_cb;
+    }
+}
+
 #define DEFINE_DPIF_DUMMY_CLASS(NAME, TYPE_STR)                             \
     struct dpif_offload_class NAME = {                                      \
         .type = TYPE_STR,                                                   \
@@ -803,6 +840,7 @@ dummy_netdev_simulate_offload(struct netdev *netdev, struct dp_packet *packet,
         .netdev_flow_del = dummy_flow_del,                                  \
         .netdev_flow_stats = dummy_flow_stats,                              \
         .register_flow_unreference_cb = dummy_register_flow_unreference_cb, \
+        .pmd_thread_lifecycle = dummy_pmd_thread_lifecycle                  \
 }
 
 DEFINE_DPIF_DUMMY_CLASS(dpif_offload_dummy_class, "dummy");

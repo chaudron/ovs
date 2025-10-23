@@ -1689,3 +1689,35 @@ recirc_id(0),in_port(1),packet_type(ns=0,id=0),eth_type(0x0800),ipv4(dst=10.1.2.
 
 OVS_VSWITCHD_STOP
 AT_CLEANUP
+
+AT_SETUP([PMD - offload work])
+OVS_VSWITCHD_START([], [], [], [DUMMY_NUMA],
+                   [-- set Open_vSwitch . other_config:hw-offload=true])
+
+AT_CHECK([ovs-appctl vlog/set dpif_offload_dummy:dbg])
+AT_CHECK([ovs-vsctl add-port br0 p0 -- set Interface p0 type=dummy-pmd])
+
+CHECK_CPU_DISCOVERED()
+CHECK_PMD_THREADS_CREATED()
+
+OVS_WAIT_UNTIL(
+  [test $(ovs-appctl coverage/read-counter dummy_offload_do_work) -gt 0])
+
+AT_CHECK([ovs-appctl dpif-netdev/pmd-perf-show \
+  | grep -Eq 'Offload cycles: +[[0-9]]+  \( *[[0-9.]]+ % of used cycles\)'])
+
+OVS_VSWITCHD_STOP
+
+LOG="$(sed -n 's/.*\(pmd_thread_lifecycle.*\)/\1/p' ovs-vswitchd.log)"
+CB=$(echo "$LOG" | sed -n '2p' | sed -n 's/.*cb=\([[^,]]*\).*/\1/p')
+CTX=$(echo "$LOG" | sed -n '2p' | sed -n 's/.*ctx=\(.*\)$/\1/p')
+
+AT_CHECK([echo "$LOG" | sed -n '1p' | sed 's/(nil)/0x0/g'], [0], [dnl
+pmd_thread_lifecycle; exit=false, core=0, numa=0, cb=0x0, ctx=0x0
+])
+AT_CHECK([echo "$LOG" | sed -n '2p' \
+          | grep -q "exit=false, core=0, numa=0, cb=$CB, ctx=$CTX"])
+AT_CHECK([echo "$LOG" | sed -n '$p' \
+          | grep -q "exit=true, core=0, numa=0, cb=$CB, ctx=$CTX"])
+
+AT_CLEANUP
