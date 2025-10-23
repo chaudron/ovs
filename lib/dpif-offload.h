@@ -22,6 +22,7 @@
 /* Forward declarations of private structures. */
 struct dpif_offload_class;
 struct dpif_offload;
+struct pmd_perf_stats;
 
 /* Structure used by the dpif_offload_dump_* functions. */
 struct dpif_offload_dump {
@@ -217,5 +218,15 @@ static inline void dpif_offload_datapath_flow_op_continue(
                      old_flow_reference, error);
     }
 }
+
+/* PMD Thread helper functions. */
+struct dpif_offload_pmd_ctx;
+
+void dpif_offload_pmd_thread_reload(const char *dpif_name,
+                                    unsigned core_id, int numa_id,
+                                    struct dpif_offload_pmd_ctx **ctx);
+uint64_t dpif_offload_pmd_thread_do_work(struct dpif_offload_pmd_ctx *ctx,
+                                         struct pmd_perf_stats *stats);
+void dpif_offload_pmd_thread_exit(struct dpif_offload_pmd_ctx *ctx);
 
 #endif /* DPIF_OFFLOAD_H */

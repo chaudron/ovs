@@ -6513,6 +6513,7 @@ pmd_thread_main(void *f_)
 {
     struct dp_netdev_pmd_thread *pmd = f_;
     struct pmd_perf_stats *s = &pmd->perf_stats;
+    struct dpif_offload_pmd_ctx *offload_ctx = NULL;
     unsigned int lc = 0;
     struct polled_queue *poll_list;
     bool wait_for_reload = false;
@@ -6545,6 +6546,9 @@ reload:
     if (!dpdk_attached) {
         dpdk_attached = dpdk_attach_thread(pmd->core_id);
     }
+
+    dpif_offload_pmd_thread_reload(pmd->dp->full_name, pmd->core_id,
+                                   pmd->numa_id, &offload_ctx);
 
     /* List port/core affinity */
     for (i = 0; i < poll_cnt; i++) {
@@ -6585,7 +6589,7 @@ reload:
     ovs_mutex_lock(&pmd->perf_stats.stats_mutex);
     for (;;) {
         uint64_t rx_packets = 0, tx_packets = 0;
-        uint64_t time_slept = 0;
+        uint64_t time_slept = 0, offload_cycles = 0;
         uint64_t max_sleep;
 
         pmd_perf_start_iteration(s);
@@ -6624,6 +6628,10 @@ reload:
                                                    max_sleep && sleep_time
                                                    ? true : false);
         }
+
+        /* Do work required by any of the hardware offload providers. */
+        offload_cycles = dpif_offload_pmd_thread_do_work(offload_ctx,
+                                                         &pmd->perf_stats);
 
         if (max_sleep) {
             /* Check if a sleep should happen on this iteration. */
@@ -6684,7 +6692,7 @@ reload:
         }
 
         pmd_perf_end_iteration(s, rx_packets, tx_packets, time_slept,
-                               pmd_perf_metrics_enabled(pmd));
+                               offload_cycles, pmd_perf_metrics_enabled(pmd));
     }
     ovs_mutex_unlock(&pmd->perf_stats.stats_mutex);
 
@@ -6705,6 +6713,7 @@ reload:
         goto reload;
     }
 
+    dpif_offload_pmd_thread_exit(offload_ctx);
     pmd_free_static_tx_qid(pmd);
     dfc_cache_uninit(&pmd->flow_cache);
     free(poll_list);
@@ -9629,7 +9638,7 @@ dp_netdev_pmd_try_optimize(struct dp_netdev_pmd_thread *pmd,
                            struct polled_queue *poll_list, int poll_cnt)
 {
     struct dpcls *cls;
-    uint64_t tot_idle = 0, tot_proc = 0, tot_sleep = 0;
+    uint64_t tot_idle = 0, tot_proc = 0, tot_sleep = 0, tot_offload = 0;
     unsigned int pmd_load = 0;
 
     if (pmd->ctx.now > pmd->next_cycle_store) {
@@ -9648,11 +9657,14 @@ dp_netdev_pmd_try_optimize(struct dp_netdev_pmd_thread *pmd,
                        pmd->prev_stats[PMD_CYCLES_ITER_BUSY];
             tot_sleep = pmd->perf_stats.counters.n[PMD_CYCLES_SLEEP] -
                         pmd->prev_stats[PMD_CYCLES_SLEEP];
+            tot_offload = pmd->perf_stats.counters.n[PMD_CYCLES_OFFLOAD] -
+                          pmd->prev_stats[PMD_CYCLES_OFFLOAD];
 
             if (pmd_alb->is_enabled && !pmd->isolated) {
                 if (tot_proc) {
                     pmd_load = ((tot_proc * 100) /
-                                    (tot_idle + tot_proc + tot_sleep));
+                                    (tot_idle + tot_proc + tot_sleep
+                                     + tot_offload));
                 }
 
                 atomic_read_relaxed(&pmd_alb->rebalance_load_thresh,
@@ -9671,6 +9683,8 @@ dp_netdev_pmd_try_optimize(struct dp_netdev_pmd_thread *pmd,
                         pmd->perf_stats.counters.n[PMD_CYCLES_ITER_BUSY];
         pmd->prev_stats[PMD_CYCLES_SLEEP] =
                         pmd->perf_stats.counters.n[PMD_CYCLES_SLEEP];
+        pmd->prev_stats[PMD_CYCLES_OFFLOAD] =
+                        pmd->perf_stats.counters.n[PMD_CYCLES_OFFLOAD];
 
         /* Get the cycles that were used to process each queue and store. */
         for (unsigned i = 0; i < poll_cnt; i++) {
