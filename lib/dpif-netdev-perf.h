@@ -82,6 +82,7 @@ enum pmd_stat_type {
     PMD_CYCLES_UPCALL,      /* Cycles spent processing upcalls. */
     PMD_SLEEP_ITER,         /* Iterations where a sleep has taken place. */
     PMD_CYCLES_SLEEP,       /* Total cycles slept to save power. */
+    PMD_CYCLES_OFFLOAD,     /* Total cycles spend handling offload. */
     PMD_N_STATS
 };
 
@@ -411,7 +412,7 @@ pmd_perf_start_iteration(struct pmd_perf_stats *s);
 void
 pmd_perf_end_iteration(struct pmd_perf_stats *s, int rx_packets,
                        int tx_packets, uint64_t sleep_cycles,
-                       bool full_metrics);
+                       uint64_t offload_cycles, bool full_metrics);
 
 /* Formatting the output of commands. */
 

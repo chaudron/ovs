@@ -232,6 +232,7 @@ pmd_perf_format_overall_stats(struct ds *str, struct pmd_perf_stats *s,
     uint64_t busy_iter = tot_iter >= idle_iter ? tot_iter - idle_iter : 0;
     uint64_t sleep_iter = stats[PMD_SLEEP_ITER];
     uint64_t tot_sleep_cycles = stats[PMD_CYCLES_SLEEP];
+    uint64_t offload_cycles = stats[PMD_CYCLES_OFFLOAD];
 
     ds_put_format(str,
             "  Iterations:         %12"PRIu64"  (%.2f us/it)\n"
@@ -242,7 +243,8 @@ pmd_perf_format_overall_stats(struct ds *str, struct pmd_perf_stats *s,
             "  Sleep time (us):    %12.0f  (%3.0f us/iteration avg.)\n",
             tot_iter,
             tot_iter
-                ? (tot_cycles + tot_sleep_cycles) * us_per_cycle / tot_iter
+                ? (tot_cycles + tot_sleep_cycles + offload_cycles)
+                  * us_per_cycle / tot_iter
                 : 0,
             tot_cycles, 100.0 * (tot_cycles / duration) / tsc_hz,
             idle_iter,
@@ -252,6 +254,13 @@ pmd_perf_format_overall_stats(struct ds *str, struct pmd_perf_stats *s,
             sleep_iter, tot_iter ? 100.0 * sleep_iter / tot_iter : 0,
             tot_sleep_cycles * us_per_cycle,
             sleep_iter ? (tot_sleep_cycles * us_per_cycle) / sleep_iter : 0);
+    if (offload_cycles > 0) {
+        ds_put_format(str,
+            "  Offload cycles:     %12" PRIu64 "  (%5.1f %% of used cycles)\n",
+            offload_cycles,
+            100.0 * offload_cycles / (tot_cycles + tot_sleep_cycles
+                                      + offload_cycles));
+    }
     if (rx_packets > 0) {
         ds_put_format(str,
             "  Rx packets:         %12"PRIu64"  (%.0f Kpps, %.0f cycles/pkt)\n"
@@ -532,14 +541,14 @@ OVS_REQUIRES(s->stats_mutex)
 void
 pmd_perf_end_iteration(struct pmd_perf_stats *s, int rx_packets,
                        int tx_packets, uint64_t sleep_cycles,
-                       bool full_metrics)
+                       uint64_t offload_cycles, bool full_metrics)
 {
     uint64_t now_tsc = cycles_counter_update(s);
     struct iter_stats *cum_ms;
     uint64_t cycles, cycles_per_pkt = 0;
     char *reason = NULL;
 
-    cycles = now_tsc - s->start_tsc - sleep_cycles;
+    cycles = now_tsc - s->start_tsc - sleep_cycles - offload_cycles;
     s->current.timestamp = s->iteration_cnt;
     s->current.cycles = cycles;
     s->current.pkts = rx_packets;
@@ -556,6 +565,10 @@ pmd_perf_end_iteration(struct pmd_perf_stats *s, int rx_packets,
     if (sleep_cycles) {
         pmd_perf_update_counter(s, PMD_SLEEP_ITER, 1);
         pmd_perf_update_counter(s, PMD_CYCLES_SLEEP, sleep_cycles);
+    }
+
+    if (offload_cycles) {
+        pmd_perf_update_counter(s, PMD_CYCLES_OFFLOAD, offload_cycles);
     }
 
     if (!full_metrics) {

@@ -35,6 +35,7 @@ cpu
 cpus
 cstime
 csum
+ctx
 cutime
 cvlan
 datapath
@@ -45,6 +46,7 @@ decap
 decapsulation
 defrag
 defragment
+deinitialization
 deref
 dereference
 dest

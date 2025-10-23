@@ -87,6 +87,10 @@ dpif_offload_flow_dump_thread_init(
 }
 
 
+/* Offload Provider specific PMD thread work callback definition. */
+typedef void dpif_offload_pmd_thread_work_cb(unsigned core_id, int numa_id,
+                                             void *ctx);
+
 struct dpif_offload_class {
     /* Type of DPIF offload provider in this class, e.g., "tc", "dpdk",
      * "dummy", etc. */
@@ -305,6 +309,28 @@ struct dpif_offload_class {
      * to netdev_flow_put() is no longer held by the offload provider. */
     void (*register_flow_unreference_cb)(const struct dpif_offload *,
                                          dpif_offload_flow_unreference_cb *);
+
+
+    /* The API below is specific to PMD (userspace) thread lifecycle handling.
+     *
+     * This API allows a provider to supply a callback function
+     * (via `*callback`) and an optional context pointer (via `*ctx`) for a
+     * PMD thread.
+     *
+     * The lifecycle hook may be invoked multiple times for the same PMD
+     * thread.  For example, when the thread is reinitialized, this function
+     * will be called again and the previous `callback` and `ctx` values will
+     * be passed back in.  It is the provider's responsibility to decide
+     * whether those should be reused, replaced, or cleaned up before storing
+     * new values.
+     *
+     * When the PMD thread is terminating, this API is called with
+     * `exit == true`.  At that point, the provider must release any resources
+     * associated with the previously returned `callback` and `ctx`. */
+    void (*pmd_thread_lifecycle)(const struct dpif_offload *, bool exit,
+                                 unsigned core_id, int numa_id,
+                                 dpif_offload_pmd_thread_work_cb **callback,
+                                 void **ctx);
 };
 
 extern struct dpif_offload_class dpif_offload_dummy_class;
