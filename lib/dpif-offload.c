@@ -1786,3 +1786,53 @@ dpif_offload_port_mgr_port_dump_done(
     free(state);
     return 0;
 }
+
+struct dpif_offload_pmd_ctx {
+    unsigned core_id;
+    int numa_id;
+};
+
+void
+dpif_offload_pmd_thread_reload(const char *dpif_name, unsigned core_id,
+                               int numa_id, struct dpif_offload_pmd_ctx **ctx_)
+{
+    struct dpif_offload_pmd_ctx *ctx;
+    struct dp_offload *dp_offload;
+
+    ovs_mutex_lock(&dpif_offload_mutex);
+    dp_offload = shash_find_data(&dpif_offload_providers, dpif_name);
+    ovs_mutex_unlock(&dpif_offload_mutex);
+
+    if (OVS_UNLIKELY(!dp_offload)) {
+        return;
+    }
+
+    // Single pmd_thread_lifecycle() callback?
+    // bool pmd_thread_lifecycle(bool exit, **callback, **cb_data);
+
+    if (!*ctx_) {
+        ctx = xzalloc(sizeof(*ctx)); //FIXME: DO WE HAVE NUMA SPECIFIC MALLOC?
+        *ctx_ = ctx;
+    } else {
+        ctx = *ctx_;
+    }
+
+    ctx->core_id = core_id;
+    ctx->core_id = numa_id;
+}
+
+void
+dpif_offload_pmd_thread_do_work(struct dpif_offload_pmd_ctx *ctx)
+{
+    if (!ctx) {
+        return;
+    }
+}
+
+void
+dpif_offload_pmd_thread_exit(struct dpif_offload_pmd_ctx *ctx)
+{
+    if (!ctx) {
+        return;
+    }
+}

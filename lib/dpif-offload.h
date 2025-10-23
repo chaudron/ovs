@@ -208,4 +208,14 @@ static inline void dpif_offload_datapath_flow_op_continue(
     }
 }
 
+/* PMD Thread helper functions. */
+struct dpif_offload_pmd_ctx;
+
+void dpif_offload_pmd_thread_reload(const char *dpif_name,
+                                    unsigned core_id, int numa_id,
+                                    struct dpif_offload_pmd_ctx **ctx);
+void dpif_offload_pmd_thread_do_work(struct dpif_offload_pmd_ctx *ctx);
+void dpif_offload_pmd_thread_exit(struct dpif_offload_pmd_ctx *ctx);
+
+
 #endif /* DPIF_OFFLOAD_H */

@@ -6483,6 +6483,7 @@ pmd_thread_main(void *f_)
 {
     struct dp_netdev_pmd_thread *pmd = f_;
     struct pmd_perf_stats *s = &pmd->perf_stats;
+    struct dpif_offload_pmd_ctx *offload_ctx = NULL;
     unsigned int lc = 0;
     struct polled_queue *poll_list;
     bool wait_for_reload = false;
@@ -6515,6 +6516,9 @@ reload:
     if (!dpdk_attached) {
         dpdk_attached = dpdk_attach_thread(pmd->core_id);
     }
+
+    dpif_offload_pmd_thread_reload(pmd->dp->full_name, pmd->core_id,
+                                   pmd->numa_id, &offload_ctx);
 
     /* List port/core affinity */
     for (i = 0; i < poll_cnt; i++) {
@@ -6594,6 +6598,9 @@ reload:
                                                    max_sleep && sleep_time
                                                    ? true : false);
         }
+
+        /* Do work required by any of the hardware offload providers. */
+        dpif_offload_pmd_thread_do_work(offload_ctx);
 
         if (max_sleep) {
             /* Check if a sleep should happen on this iteration. */
@@ -6675,6 +6682,7 @@ reload:
         goto reload;
     }
 
+    dpif_offload_pmd_thread_exit(offload_ctx);
     pmd_free_static_tx_qid(pmd);
     dfc_cache_uninit(&pmd->flow_cache);
     free(poll_list);
