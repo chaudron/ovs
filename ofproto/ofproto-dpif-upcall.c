@@ -45,6 +45,25 @@
 #include "openvswitch/usdt-probes.h"
 #include "openvswitch/vlog.h"
 #include "lib/netdev-provider.h"
+#include "uuid.h"
+
+#include "ec-debug.h"
+EC_DBG_SETUP_BUFFER();
+
+#define UKEY_DEBUG(UKEY, ...)                                                 \
+    do {                                                                      \
+        char dbg_buffer[512];                                                 \
+        int len = 0;                                                          \
+                                                                              \
+        len = snprintf(dbg_buffer, sizeof dbg_buffer,                         \
+                       "ukey[%p][" UUID_FMT "]",                              \
+                       (UKEY), UUID_ARGS((struct uuid *)&(UKEY)->ufid));      \
+        if (len < sizeof dbg_buffer) {                                        \
+            snprintf(dbg_buffer + len, sizeof dbg_buffer - len, __VA_ARGS__); \
+        }                                                                     \
+                                                                              \
+        EC_DBG("%s", dbg_buffer);                                             \
+    } while (0)
 
 #define UPCALL_MAX_BATCH 64
 #define REVALIDATE_MAX_BATCH 50
@@ -1853,6 +1872,7 @@ ukey_create__(const struct nlattr *key, size_t key_len,
         recirc_refs_swap(&ukey->recircs, &xout->recircs);
     }
 
+    UKEY_DEBUG(ukey, "create");
     return ukey;
 }
 
@@ -2017,6 +2037,7 @@ ukey_install__(struct udpif *udpif, struct udpif_key *new_ukey)
         }
     } else {
         ovs_mutex_lock(&new_ukey->mutex);
+        UKEY_DEBUG(new_ukey, "install/insert");
         cmap_insert(&umap->cmap, &new_ukey->cmap_node, new_ukey->hash);
         transition_ukey(new_ukey, UKEY_VISIBLE);
         locked = true;
@@ -2031,6 +2052,8 @@ transition_ukey_at(struct udpif_key *ukey, enum ukey_state dst,
                    const char *where)
     OVS_REQUIRES(ukey->mutex)
 {
+    UKEY_DEBUG(ukey, "state %d -> %d", ukey->state, dst);
+
     if (dst < ukey->state) {
         VLOG_ABORT("Invalid ukey transition %d->%d (last transitioned from "
                    "thread %u at %s)", ukey->state, dst, ukey->state_thread,
@@ -2149,6 +2172,8 @@ ukey_delete__(struct udpif_key *ukey)
     OVS_NO_THREAD_SAFETY_ANALYSIS
 {
     if (ukey) {
+        UKEY_DEBUG(ukey, "del/free");
+
         if (ukey->key_recirc_id) {
             recirc_free_id(ukey->key_recirc_id);
         }
@@ -2166,6 +2191,7 @@ ukey_delete(struct umap *umap, struct udpif_key *ukey)
 {
     ovs_mutex_lock(&ukey->mutex);
     if (ukey->state < UKEY_DELETED) {
+        UKEY_DEBUG(ukey, "del/unmap");
         cmap_remove(&umap->cmap, &ukey->cmap_node, ukey->hash);
         ovsrcu_postpone(ukey_delete__, ukey);
         transition_ukey(ukey, UKEY_DELETED);
