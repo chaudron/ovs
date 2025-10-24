@@ -1681,6 +1681,63 @@ class CmdDumpNla(gdb.Command):
 
 
 #
+# Implements the GDB "ovs_dump_ec_debug" command
+#
+class CmdShowDebugBuffer(gdb.Command):
+    """Dump the ec-debug buffer.
+    Usage:
+      ovs_dump_ec_debug
+    """
+    def __init__(self):
+        super(CmdShowDebugBuffer, self).__init__("ovs_dump_ec_debug",
+                                                 gdb.COMMAND_DATA)
+
+    def invoke(self, arg, from_tty):
+        ec_buffer = get_global_variable('EC_DEBUG_BUFFER')
+        if ec_buffer is None:
+            return
+
+        inferior = gdb.selected_inferior()
+
+        size = int(ec_buffer['size'])
+        start = int(ec_buffer['start'])
+        write = int(ec_buffer['write'])
+        buffer_ptr = ec_buffer['buffer'].address.cast(
+            gdb.lookup_type('uint8_t').pointer())
+        used_size = write - start
+
+        if used_size == 0:
+            print("EC_DEBUG_BUFFER is empty.")
+            return
+
+        if used_size > size:
+            print("Warning: Buffer inconsistency. "
+                  f"Used size ({used_size}) > total size ({size}).")
+            print("Dumping up to total size.")
+            used_size = size
+            start = write - size
+
+        print(f"Dumping EC_DEBUG_BUFFER (Total Size: {size}, "
+              f"Used: {used_size}):")
+
+        start_idx = start % size
+        first_part_len = min(used_size, size - start_idx)
+        second_part_len = used_size - first_part_len
+        total_data = b""
+
+        if first_part_len > 0:
+            read_ptr = buffer_ptr + start_idx
+            chunk_data = inferior.read_memory(read_ptr, first_part_len)
+            total_data += chunk_data.tobytes()
+
+        if second_part_len > 0:
+            chunk_data = inferior.read_memory(buffer_ptr, second_part_len)
+            total_data += chunk_data.tobytes()
+
+        print(total_data.decode('ascii', errors='replace'))
+
+
+#
 # Initialize all GDB commands
 #
 CmdDumpBridge()
@@ -1703,3 +1760,4 @@ CmdDumpUdpifKeys()
 CmdShowFDB()
 CmdShowUpcall()
 CmdDumpDpConntrackConn()
+CmdShowDebugBuffer()
