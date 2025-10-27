@@ -288,10 +288,6 @@ struct dp_netdev {
     struct ovs_mutex meters_lock;
     struct cmap meters;
 
-    /* Flow mega ufid to flow mapping. */
-    struct ovs_mutex mufid_to_flow_lock;
-    struct cmap mufid_to_flow OVS_GUARDED;
-
     /* Probability of EMC insertions is a factor of 'emc_insert_min'.*/
     atomic_uint32_t emc_insert_min;
     /* Enable collection of PMD performance metrics. */
@@ -1813,10 +1809,6 @@ create_dp_netdev(const char *name, const struct dpif_class *class,
     cmap_init(&dp->meters);
     ovs_mutex_init(&dp->meters_lock);
 
-    /* Initialize mega ufid-to-flow mapping resources. */
-    cmap_init(&dp->mufid_to_flow);
-    ovs_mutex_init(&dp->mufid_to_flow_lock);
-
     /* Disable upcalls by default. */
     dp_netdev_disable_upcall(dp);
     dp->upcall_aux = NULL;
@@ -1958,9 +1950,6 @@ dp_netdev_free(struct dp_netdev *dp)
 
     cmap_destroy(&dp->tx_bonds);
     ovs_mutex_destroy(&dp->bond_mutex);
-
-    cmap_destroy(&dp->mufid_to_flow);
-    ovs_mutex_destroy(&dp->mufid_to_flow_lock);
 
     /* Upcalls must be disabled at this point */
     dp_netdev_destroy_upcall_lock(dp);
@@ -2409,96 +2398,6 @@ dp_netdev_pmd_find_dpcls(struct dp_netdev_pmd_thread *pmd,
     return cls;
 }
 
-/* Associate mark with a flow, which is 1:N mapping */
-static void
-mufid_to_flow_associate(struct dp_netdev *dp, struct dp_netdev_flow *flow)
-{
-    dp_netdev_flow_ref(flow);
-
-    ovs_mutex_lock(&dp->mufid_to_flow_lock);
-    cmap_insert(&dp->mufid_to_flow,
-                CONST_CAST(struct cmap_node *, &flow->mufid_node),
-                dp_netdev_flow_hash(&flow->mega_ufid));
-    flow->offloaded = true;
-    ovs_mutex_unlock(&dp->mufid_to_flow_lock);
-
-    VLOG_DBG("Associated dp_netdev flow %p with mega_ufid "UUID_FMT,
-             flow, UUID_ARGS((struct uuid *) &flow->mega_ufid));
-}
-
-static bool
-mufid_has_no_references(struct dp_netdev *dp, const ovs_u128 *ufid)
-{
-    struct dp_netdev_flow *flow;
-
-    CMAP_FOR_EACH_WITH_HASH (flow, mufid_node, dp_netdev_flow_hash(ufid),
-                             &dp->mufid_to_flow) {
-        if (flow->offloaded && ovs_u128_equals(flow->mega_ufid, *ufid)) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-static void
-mufid_to_flow_disassociate(struct dp_netdev *dp, struct dp_netdev_flow *flow)
-{
-    if (OVS_UNLIKELY(!flow->offloaded)) {
-        return;
-    }
-
-    ovs_mutex_lock(&dp->mufid_to_flow_lock);
-    flow->offloaded = false;
-    cmap_remove(&dp->mufid_to_flow,
-                CONST_CAST(struct cmap_node *, &flow->mufid_node),
-                dp_netdev_flow_hash(&flow->mega_ufid));
-    ovs_mutex_unlock(&dp->mufid_to_flow_lock);
-
-    dp_netdev_flow_unref(flow);
-}
-
-static void
-mufid_to_flow_disassociate_all(struct dp_netdev *dp, const ovs_u128 *ufid)
-{
-    size_t hash = dp_netdev_flow_hash(ufid);
-    struct dp_netdev_flow *flow;
-
-    ovs_mutex_lock(&dp->mufid_to_flow_lock);
-    CMAP_FOR_EACH_WITH_HASH (flow, mufid_node, hash, &dp->mufid_to_flow) {
-            if (flow->offloaded && ovs_u128_equals(flow->mega_ufid, *ufid)) {
-                flow->offloaded = false;
-                cmap_remove(&dp->mufid_to_flow,
-                            CONST_CAST(struct cmap_node *, &flow->mufid_node),
-                            hash);
-
-                dp_netdev_flow_unref(flow);
-            }
-    }
-    ovs_mutex_unlock(&dp->mufid_to_flow_lock);
-}
-
-static struct dp_netdev_flow *
-mufid_to_flow_find(const struct dp_netdev_pmd_thread *pmd,
-                   const ovs_u128 *ufid)
-{
-    struct dp_netdev_flow *flow;
-
-    if (!ufid) {
-        return NULL;
-    }
-
-    CMAP_FOR_EACH_WITH_HASH (flow, mufid_node, dp_netdev_flow_hash(ufid),
-                             &pmd->dp->mufid_to_flow) {
-
-        if (flow->offloaded && ovs_u128_equals(flow->mega_ufid, *ufid)
-            && flow->pmd_id == pmd->core_id && !flow->dead) {
-            return flow;
-        }
-    }
-    return NULL;
-}
-
 static void
 log_netdev_flow_change(const struct dp_netdev_flow *flow,
                        const struct match *match,
@@ -2564,51 +2463,150 @@ log_netdev_flow_change(const struct dp_netdev_flow *flow,
     ds_destroy(&ds);
 }
 
+/* Offloaded flows can be handled asynchronously, so we do not always know
+ * whether a specific flow is offloaded or not.  It might still be pending;
+ * in fact, multiple modifications can be pending, and the actual offload
+ * state depends on the completion of each modification.
+ *
+ * To correctly determine whether a flow is offloaded when it is being
+ * destroyed (and therefore requires cleanup), we must ensure that all
+ * operations have completed.  To achieve this, we track the number of
+ * outstanding offloaded flow modifications. */
+static bool
+offload_queue_inc(struct dp_netdev_flow *flow)
+{
+    int current;
+
+    while (true) {
+        atomic_read(&flow->offload_queue_depth, &current);
+        if (current < 0) {
+            /* We are cleaning up, so no longer enqueue operations. */
+            return false;
+        }
+
+        /* Here we try to atomically increase the value.  If we do not succeed,
+         * someone else has modified it, and we need to check again for a
+         * current negative value. */
+        if (atomic_compare_exchange_strong(&flow->offload_queue_depth,
+                                           &current, current + 1)) {
+            return true;
+        }
+    }
+}
+
+static bool
+offload_queue_dec(struct dp_netdev_flow *flow)
+{
+    int old;
+
+    atomic_sub(&flow->offload_queue_depth, 1, &old);
+    ovs_assert(old >= 1);
+
+    if (old == 1) {
+        /* Note that this only indicates that the queue might be empty. */
+        return true;
+    }
+    return false;
+}
+
+static bool
+offload_queue_complete(struct dp_netdev_flow *flow)
+{
+    /* This function returns false if the queue is still in use.
+     * If the queue is empty, it will attempt to atomically mark it as
+     * 'not in use' by making the queue depth negative.  This prevents
+     * other flow operations from being added.  If successful, it returns
+     * true. */
+     int expected_val = 0;
+
+    return atomic_compare_exchange_strong(&flow->offload_queue_depth,
+                                          &expected_val, -1);
+}
+
 static void
-offload_flow_del_resume(int error)
+offload_flow_reference_unreference_cb(unsigned pmd_id OVS_UNUSED,
+                                      void *flow_reference_)
+{
+    struct dp_netdev_flow *flow_reference = flow_reference_;
+
+    if (flow_reference) {
+        flow_reference->offloaded = false;
+        dp_netdev_flow_unref(flow_reference);
+    }
+}
+
+static void
+offload_flow_del_resume(struct dp_netdev_flow *flow_reference,
+                        int error)
 {
     if (error == EINPROGRESS) {
         return;
     }
-    /* Currently there is no work to be done on flow deletion. */
+
+    if (error) {
+        odp_port_t in_port = flow_reference->flow.in_port.odp_port;
+
+        VLOG_DBG(
+            "Failed removing offload flow ufid " UUID_FMT " from port %d: %d",
+            UUID_ARGS((struct uuid *)&flow_reference->mega_ufid), in_port,
+            error);
+    } else {
+        /* Release because we successfully removed the reference. */
+        dp_netdev_flow_unref(flow_reference);
+    }
+
+    /* Release as we took a reference in offload_flow_del(). */
+    dp_netdev_flow_unref(flow_reference);
 }
 
 static void
-offload_flow_del_resume_cb(void *aux_dp OVS_UNUSED, void *aux_flow OVS_UNUSED,
-                           struct dpif_flow_stats *stats OVS_UNUSED, int error)
+offload_flow_del_resume_cb(void *aux OVS_UNUSED,
+                           struct dpif_flow_stats *stats OVS_UNUSED,
+                           unsigned pmd_id OVS_UNUSED,
+                           void *flow_reference,
+                           void *previous_flow_reference OVS_UNUSED, int error)
 {
-    offload_flow_del_resume(error);
+    offload_flow_del_resume(flow_reference, error);
 }
 
 static void
-offload_flow_del(struct dp_netdev *dp, struct dp_netdev_flow *flow)
+offload_flow_del(struct dp_netdev *dp, unsigned pmd_id,
+                 struct dp_netdev_flow *flow)
 {
     odp_port_t in_port = flow->flow.in_port.odp_port;
+    struct dpif_offload_flow_del del = {
+        .in_port = in_port,
+        .pmd_id = pmd_id,
+        .ufid = CONST_CAST(ovs_u128 *, &flow->mega_ufid),
+        .flow_reference = flow,
+        .stats = NULL,
+        .cb_data = { .callback = offload_flow_del_resume_cb },
+    };
+    int error;
 
-    if (!flow->offloaded) {
+    if (!dpif_offload_is_offload_enabled()) {
         return;
     }
 
-    mufid_to_flow_disassociate(dp, flow);
-
-    if (mufid_has_no_references(dp, &flow->mega_ufid)
-        && dpif_offload_is_offload_enabled()) {
-        struct dpif_offload_flow_del del = {
-            .in_port = in_port,
-            .ufid = CONST_CAST(ovs_u128 *, &flow->mega_ufid),
-            .stats = NULL,
-            .cb_data = { .callback = offload_flow_del_resume_cb },
-        };
-        int ret;
-
-        ret = dpif_offload_datapath_flow_del(dp->full_name, &del);
-        if (ret && ret != EINPROGRESS) {
-            VLOG_DBG("Failed removing offload flow ufid "UUID_FMT
-                     " from port %d",
-                     UUID_ARGS((struct uuid *)&flow->mega_ufid), in_port);
-        }
-        offload_flow_del_resume(ret);
+    /* This offload flow delete is only called when the actual flow is
+     * destructed.  However, we can only trust the state of flow->offloaded
+     * if no more flow_put operations are pending.  Below, we check whether
+     * the queue can be marked as complete, and then determine if we need
+     * to schedule a removal.  If not, the delete will be rescheduled later
+     * in the last offload_flow_put_resume_cb() callback. */
+    ovs_assert(flow->dead);
+    if (!offload_queue_complete(flow) || !flow->offloaded) {
+        return;
     }
+
+    flow->offloaded = false;
+    dp_netdev_flow_ref(flow);
+
+    /* It's the responsibility of the offload provider to remove the
+     * actual rule from hardware only if none of the other PMD threads
+     * have the rule installed in hardware. */
+    error = dpif_offload_datapath_flow_del(dp->full_name, &del);
+    offload_flow_del_resume(flow, error);
 }
 
 static void
@@ -2626,8 +2624,8 @@ dp_netdev_pmd_remove_flow(struct dp_netdev_pmd_thread *pmd,
     dp_netdev_simple_match_remove(pmd, flow);
     cmap_remove(&pmd->flow_table, node, dp_netdev_flow_hash(&flow->ufid));
     ccmap_dec(&pmd->n_flows, odp_to_u32(in_port));
-    offload_flow_del(pmd->dp, flow);
     flow->dead = true;
+    offload_flow_del(pmd->dp, pmd->core_id, flow);
 
     dp_netdev_flow_unref(flow);
 }
@@ -3470,45 +3468,63 @@ dp_netdev_flow_is_simple_match(const struct match *match)
 
 static void
 offload_flow_put_resume(struct dp_netdev *dp, struct dp_netdev_flow *flow,
-                        int error)
+                        struct dp_netdev_flow *previous_flow_reference,
+                        unsigned pmd_id, int error)
 {
     if (error == EINPROGRESS) {
         return;
     }
 
     if (!error) {
-        if (!flow->offloaded) {
-            mufid_to_flow_associate(dp, flow);
-        }
-
-        if (flow->dead) {
-            /* If flows are processed asynchronously, modifications might
-            * still be queued up while the flow is being removed. In this
-            * case we need to go through the delete process here. */
-            offload_flow_del(dp, flow);
-        }
+        flow->offloaded = true;
     } else {
-        /* On error, no flows should be associated with this mega_ufid offload,
-         * so disassociate all dp_flow structures. */
-        if (flow->offloaded) {
-            mufid_to_flow_disassociate_all(dp, &flow->mega_ufid);
+        /* If the flow was already offloaded, the new action set can no
+         * longer be offloaded.  In theory, we should disassociate the
+         * offload from all PMDs that have this flow marked as offloaded.
+         * Unfortunately, there is no mechanism to inform other PMDs, so
+         * we cannot explicitly mark such flows.  This situation typically
+         * occurs when the revalidator modifies the flow, so it is safe to
+         * assume it will update all affected flows and that the offload
+         * will subsequently fail. */
+        flow->offloaded = false;
+
+        /* On error, the flow reference was not stored by the offload provider,
+         * so we should decrease the reference. */
+        dp_netdev_flow_unref(flow);
+    }
+
+    if (offload_queue_dec(flow) && flow->dead) {
+        /* If flows are processed asynchronously, modifications might
+         * still be queued up while the flow is being removed.  If this
+         * was the last flow in the queue on a dead flow, we try again
+         * to see if we need to remove this flow. */
+        offload_flow_del(dp, pmd_id, flow);
+    }
+
+    if (previous_flow_reference) {
+        dp_netdev_flow_unref(previous_flow_reference);
+        if (previous_flow_reference != flow) {
+            VLOG_DBG("Updated flow reference was from outdated flow");
         }
     }
-    dp_netdev_flow_unref(flow);
 }
 
 static void
-offload_flow_put_resume_cb(void *aux_dp, void *aux_flow,
-                           struct dpif_flow_stats *stats OVS_UNUSED, int error)
+offload_flow_put_resume_cb(void *aux, struct dpif_flow_stats *stats OVS_UNUSED,
+                           unsigned pmd_id, void *flow_reference_,
+                           void *old_flow_reference_,
+                           int error)
 {
-    struct dp_netdev *dp = aux_dp;
-    struct dp_netdev_flow *flow = aux_flow;
+    struct dp_netdev *dp = aux;
+    struct dp_netdev_flow *flow_reference = flow_reference_;
+    struct dp_netdev_flow *old_flow_reference = old_flow_reference_;
 
-    offload_flow_put_resume(dp, flow, error);
+    offload_flow_put_resume(dp, flow_reference, old_flow_reference,
+                            pmd_id, error);
 }
 
 static void
-offload_flow_put(struct dp_netdev *dp, struct dp_netdev_flow *flow,
+offload_flow_put(struct dp_netdev_pmd_thread *pmd, struct dp_netdev_flow *flow,
                  struct match *match, const struct nlattr *actions,
                  size_t actions_len, bool modify)
 {
@@ -3516,24 +3532,33 @@ offload_flow_put(struct dp_netdev *dp, struct dp_netdev_flow *flow,
         .modify = modify,
         .in_port = match->flow.in_port.odp_port,
         .orig_in_port = flow->orig_in_port,
+        .pmd_id = pmd->core_id,
         .ufid = CONST_CAST(ovs_u128 *, &flow->mega_ufid),
         .match = match,
         .actions = actions,
         .actions_len = actions_len,
         .stats = NULL,
-        .cb_data = { .callback = offload_flow_put_resume_cb,
-                     .callback_aux_dp = dp,
-                     .callback_aux_flow = flow },
-        };
+        .flow_reference = flow,
+        .cb_data = {
+            .callback = offload_flow_put_resume_cb,
+            .callback_aux = pmd->dp,
+        },
+    };
+    void *previous_flow_reference = NULL;
     int error;
 
-    if (!dpif_offload_is_offload_enabled()) {
+    if (!dpif_offload_is_offload_enabled() || flow->dead
+        || !offload_queue_inc(flow)) {
         return;
     }
 
     dp_netdev_flow_ref(flow);
-    error = dpif_offload_datapath_flow_put(dp->full_name, &put);
-    offload_flow_put_resume(dp, flow, error);
+
+    error = dpif_offload_datapath_flow_put(pmd->dp->full_name, &put,
+                                           &previous_flow_reference);
+    offload_flow_put_resume(pmd->dp, put.flow_reference,
+                            previous_flow_reference,
+                            pmd->core_id, error);
 }
 
 static struct dp_netdev_flow *
@@ -3574,6 +3599,7 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
     memset(&flow->stats, 0, sizeof flow->stats);
     flow->dead = false;
     flow->offloaded = false;
+    atomic_init(&flow->offload_queue_depth, 0);
     flow->batch = NULL;
     flow->orig_in_port = orig_in_port;
     *CONST_CAST(unsigned *, &flow->pmd_id) = pmd->core_id;
@@ -3609,7 +3635,7 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
         dp_netdev_simple_match_insert(pmd, flow);
     }
 
-    offload_flow_put(pmd->dp, flow, match, actions, actions_len, false);
+    offload_flow_put(pmd, flow, match, actions, actions_len, false);
     log_netdev_flow_change(flow, match, NULL, actions, actions_len);
 
     return flow;
@@ -3669,7 +3695,7 @@ flow_put_on_pmd(struct dp_netdev_pmd_thread *pmd,
             old_actions = dp_netdev_flow_get_actions(netdev_flow);
             ovsrcu_set(&netdev_flow->actions, new_actions);
 
-            offload_flow_put(pmd->dp, netdev_flow, match, put->actions,
+            offload_flow_put(pmd, netdev_flow, match, put->actions,
                              put->actions_len, true);
             log_netdev_flow_change(netdev_flow, match, old_actions,
                                    put->actions, put->actions_len);
@@ -4521,6 +4547,11 @@ dpif_netdev_set_config(struct dpif *dpif, const struct smap *other_config)
     bool sleep_changed = set_all_pmd_max_sleeps(dp, other_config);
     if (first_set_config || sleep_changed) {
         log_all_pmd_sleeps(dp);
+    }
+
+    if (first_set_config) {
+        dpif_offload_datapath_register_flow_unreference_cb(
+            dpif, offload_flow_reference_unreference_cb);
     }
 
     first_set_config = false;
@@ -7713,7 +7744,7 @@ dp_netdev_hw_flow(const struct dp_netdev_pmd_thread *pmd,
 {
     struct dp_netdev_rxq *rxq = pmd->ctx.last_rxq;
     bool postprocess_api_supported;
-    ovs_u128 *ufid;
+    void *flow_reference = NULL;
     int err;
 
     atomic_read_relaxed(&rxq->port->netdev->hw_info.postprocess_api_supported,
@@ -7725,7 +7756,9 @@ dp_netdev_hw_flow(const struct dp_netdev_pmd_thread *pmd,
     }
 
     err = dpif_offload_netdev_hw_miss_packet_postprocess(rxq->port->netdev,
-                                                         packet, &ufid);
+                                                         pmd->core_id,
+                                                         packet,
+                                                         &flow_reference);
 
     if (err && err != EOPNOTSUPP) {
         if (err != ECANCELED) {
@@ -7734,7 +7767,7 @@ dp_netdev_hw_flow(const struct dp_netdev_pmd_thread *pmd,
         return -1;
     }
 
-    *flow = mufid_to_flow_find(pmd, ufid);
+    *flow = flow_reference;
     return 0;
 }
 
