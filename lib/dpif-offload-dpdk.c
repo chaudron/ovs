@@ -53,7 +53,6 @@ struct dpdk_offload_thread {
     PADDED_MEMBERS(CACHE_LINE_SIZE,
         struct mpsc_queue queue;
         atomic_uint64_t enqueued_item;
-        struct cmap megaflow_to_mark;
         struct mov_avg_cma cma;
         struct mov_avg_ema ema;
         struct dpif_offload_dpdk *offload;
@@ -65,11 +64,13 @@ struct dpdk_offload_flow_item {
     int op;
     odp_port_t in_port;
     ovs_u128 ufid;
+    unsigned pmd_id;
     struct match match;
     struct nlattr *actions;
     size_t actions_len;
     odp_port_t orig_in_port; /* Originating in_port for tunnel flows. */
     bool requested_stats;
+    void *flow_reference;
     struct dpif_offload_flow_cb_data callback;
 };
 
@@ -102,6 +103,8 @@ struct dpif_offload_dpdk {
 
     struct id_fpool *flow_mark_pool;
 
+    dpif_offload_flow_unreference_cb *unreference_cb;
+
     /* Configuration specific variables. */
     struct ovsthread_once once_enable; /* Track first-time enablement. */
     unsigned int offload_thread_count; /* Number of offload threads. */
@@ -117,7 +120,7 @@ dpif_offload_dpdk_cast(const struct dpif_offload *offload)
 DECLARE_EXTERN_PER_THREAD_DATA(unsigned int, dpdk_offload_thread_id);
 DEFINE_EXTERN_PER_THREAD_DATA(dpdk_offload_thread_id, OVSTHREAD_ID_UNSET);
 
-static uint32_t
+uint32_t
 dpif_offload_dpdk_allocate_flow_mark(struct dpif_offload_dpdk *offload)
 {
     static struct ovsthread_once init_once = OVSTHREAD_ONCE_INITIALIZER;
@@ -139,7 +142,7 @@ dpif_offload_dpdk_allocate_flow_mark(struct dpif_offload_dpdk *offload)
     return INVALID_FLOW_MARK;
 }
 
-static void
+void
 dpif_offload_dpdk_free_flow_mark(struct dpif_offload_dpdk *offload,
                                  uint32_t flow_mark)
 {
@@ -164,8 +167,7 @@ dpdk_offload_thread_id(void)
         /* RCU will compete with other threads for shared object access.
          * Reclamation functions using a thread ID must be thread-safe.
          * For that end, and because RCU must consider all potential shared
-         * objects anyway, its thread-id can be whichever, so return 0.
-         */
+         * objects anyway, its thread-id can be whichever, so return 0. */
         id = 0;
         *dpdk_offload_thread_id_get() = id;
     }
@@ -187,79 +189,6 @@ dpif_offload_dpdk_ufid_to_thread_id(struct dpif_offload_dpdk *offload,
             (const uint64_t [2]){ ufid.u64.lo,
                                   ufid.u64.hi }, 2, 1);
     return ufid_hash % offload->offload_thread_count;
-}
-
-struct megaflow_to_mark_data {
-    const struct cmap_node node;
-    ovs_u128 mega_ufid;
-    uint32_t mark;
-};
-
-static inline uint32_t
-dpdk_offload_ufid_hash(const ovs_u128 *ufid)
-{
-    return ufid->u32[0];
-}
-
-/* Associate megaflow with a mark, which is a 1:1 mapping. */
-static void
-megaflow_to_mark_associate(struct dpif_offload_dpdk *offload,
-                           const ovs_u128 *mega_ufid, uint32_t mark)
-{
-    uint32_t hash = dpdk_offload_ufid_hash(mega_ufid);
-    struct megaflow_to_mark_data *data = xzalloc(sizeof(*data));
-    unsigned int tid = dpdk_offload_thread_id();
-
-    data->mega_ufid = *mega_ufid;
-    data->mark = mark;
-
-    cmap_insert(&offload->offload_threads[tid].megaflow_to_mark,
-                CONST_CAST(struct cmap_node *, &data->node), hash);
-}
-
-/* Disassociate megaflow with a mark. */
-static uint32_t
-megaflow_to_mark_disassociate(struct dpif_offload_dpdk *offload,
-                              const ovs_u128 *mega_ufid)
-{
-    uint32_t hash = dpdk_offload_ufid_hash(mega_ufid);
-    struct megaflow_to_mark_data *data;
-    unsigned int tid = dpdk_offload_thread_id();
-
-    CMAP_FOR_EACH_WITH_HASH (data, node, hash,
-                             &offload->offload_threads[tid].megaflow_to_mark) {
-        if (ovs_u128_equals(*mega_ufid, data->mega_ufid)) {
-            cmap_remove(&offload->offload_threads[tid].megaflow_to_mark,
-                        CONST_CAST(struct cmap_node *, &data->node), hash);
-            ovsrcu_postpone(free, data);
-            return data->mark;
-        }
-    }
-
-    VLOG_DBG("UFID " UUID_FMT " is not associated with a mark",
-             UUID_ARGS((struct uuid *) mega_ufid));
-
-    return INVALID_FLOW_MARK;
-}
-
-static inline uint32_t
-megaflow_to_mark_find(struct dpif_offload_dpdk *offload,
-                      const ovs_u128 *mega_ufid)
-{
-    uint32_t hash = dpdk_offload_ufid_hash(mega_ufid);
-    struct megaflow_to_mark_data *data;
-    unsigned int tid = dpdk_offload_thread_id();
-
-    CMAP_FOR_EACH_WITH_HASH (data, node, hash,
-                             &offload->offload_threads[tid].megaflow_to_mark) {
-        if (ovs_u128_equals(*mega_ufid, data->mega_ufid)) {
-            return data->mark;
-        }
-    }
-
-    VLOG_DBG("Mark id for ufid "UUID_FMT" was not found",
-             UUID_ARGS((struct uuid *) mega_ufid));
-    return INVALID_FLOW_MARK;
 }
 
 static bool
@@ -348,10 +277,9 @@ dpif_offload_dpdk_offload_del(struct dpdk_offload_thread *thread,
                               struct dpdk_offload_thread_item *item)
 {
     struct dpdk_offload_flow_item *flow = &item->data->flow;
-    uint32_t mark;
     struct dpif_flow_stats stats;
     struct netdev *netdev;
-    int error = 0;
+    int error;
 
     netdev = dpif_offload_dpdk_get_netdev(thread->offload, flow->in_port);
 
@@ -361,59 +289,35 @@ dpif_offload_dpdk_offload_del(struct dpdk_offload_thread *thread,
         goto do_callback;
     }
 
-    /* Disassociate the mark if possible. If it no longer exists, that means
-     * we already cleaned it up earlier. This can happen when multiple
-     * modifications are queued while the flow is being marked for deletion. */
-    mark = megaflow_to_mark_disassociate(thread->offload, &flow->ufid);
-
-    if (mark != INVALID_FLOW_MARK) {
-        error = netdev_offload_dpdk_flow_del(netdev, &flow->ufid,
-                                             flow->requested_stats ? &stats
-                                                                   : NULL);
-        dpif_offload_dpdk_free_flow_mark(thread->offload, mark);
-    }
+    /* Note that we are responsible for tracking offloads per PMD. We pass
+     * the delete request directly to the dpdk netdev offload code, which
+     * will handle the actual hardware offloaded flow.  It will only remove it
+     * when no other PMD needs it. */
+    error = netdev_offload_dpdk_flow_del(thread->offload, netdev,
+                                         flow->pmd_id, &flow->ufid,
+                                         flow->flow_reference,
+                                         flow->requested_stats ? &stats
+                                                               : NULL);
 
 do_callback:
     dpif_offload_datapath_flow_op_continue(&flow->callback,
                                            flow->requested_stats ? &stats
                                                                  : NULL,
+                                           flow->pmd_id, flow->flow_reference,
+                                           NULL,
                                            error);
     return error;
 }
 
 static int
 dpif_offload_dpdk_offload_put(struct dpdk_offload_thread *thread,
-                              struct dpdk_offload_thread_item *item,
-                              bool modify)
+                              struct dpdk_offload_thread_item *item)
 {
     struct dpdk_offload_flow_item *flow = &item->data->flow;
-    bool already_offloaded = false;
+    void *previous_flow_reference = NULL;
     struct dpif_flow_stats stats;
     struct netdev *netdev;
-    uint32_t mark;
-    int error = 0;
-
-    mark = megaflow_to_mark_find(thread->offload, &flow->ufid);
-    if (modify) {
-        if (mark == INVALID_FLOW_MARK) {
-            /* We have not offloaded this flow, so we can not modify it. */
-            error = ENOENT;
-            goto do_callback;
-        }
-    } else {
-        if (mark != INVALID_FLOW_MARK) {
-            already_offloaded = true;
-            VLOG_DBG("Flow has already been offloaded with mark %u", mark);
-            goto do_callback;
-        }
-
-        mark = dpif_offload_dpdk_allocate_flow_mark(thread->offload);
-        if (mark == INVALID_FLOW_MARK) {
-            VLOG_ERR("Failed to allocate flow mark!");
-            error = ENOSPC;
-            goto do_callback;
-        }
-    }
+    int error;
 
     netdev = dpif_offload_dpdk_get_netdev(thread->offload, flow->in_port);
 
@@ -428,34 +332,28 @@ dpif_offload_dpdk_offload_put(struct dpdk_offload_thread *thread,
         goto do_callback;
     }
 
-    error = netdev_offload_dpdk_flow_put(
-        thread->offload, netdev, &flow->match,
-        CONST_CAST(struct nlattr *, flow->actions), flow->actions_len,
-        &flow->ufid, mark, flow->orig_in_port,
-        flow->requested_stats ? &stats : NULL);
-
+    /* Note that we are responsible for tracking offloads per PMD. We pass
+     * the put request directly to the dpdk netdev offload code, which
+     * will handle the actual hardware offloaded flow.  It will only add it
+     * when no other PMD have it offloaded. */
+    error = netdev_offload_dpdk_flow_put(thread->offload, flow->pmd_id,
+                                         flow->flow_reference,
+                                         netdev, &flow->match,
+                                         CONST_CAST(struct nlattr *,
+                                                    flow->actions),
+                                         flow->actions_len, &flow->ufid,
+                                         flow->orig_in_port,
+                                         &previous_flow_reference,
+                                         flow->requested_stats
+                                             ? &stats
+                                             : NULL);
 do_callback:
-    if (!error && !modify) {
-        if (!already_offloaded) {
-            megaflow_to_mark_associate(thread->offload, &flow->ufid, mark);
-        }
-    } else if (error) {
-        if (modify) {
-            /* We failed the modification, so the flow is no longer
-             * installed, remove the mapping. */
-            if (mark != INVALID_FLOW_MARK) {
-                megaflow_to_mark_disassociate(thread->offload, &flow->ufid);
-            }
-        } else if (mark != INVALID_FLOW_MARK) {
-            /* We allocated a mark, but it was not used. */
-            dpif_offload_dpdk_free_flow_mark(thread->offload, mark);
-        }
-    }
-
     dpif_offload_datapath_flow_op_continue(&flow->callback,
-                                            flow->requested_stats ? &stats
-                                                                  : NULL,
-                                            error);
+                                           flow->requested_stats ? &stats
+                                                                 : NULL,
+                                           flow->pmd_id, flow->flow_reference,
+                                           previous_flow_reference,
+                                           error);
     return error;
 }
 
@@ -470,11 +368,11 @@ dpif_offload_dpdk_offload_flow(struct dpdk_offload_thread *thread,
     switch (flow_offload->op) {
     case DPDK_NETDEV_FLOW_OFFLOAD_OP_ADD:
         op = "add";
-        ret = dpif_offload_dpdk_offload_put(thread, item, false);
+        ret = dpif_offload_dpdk_offload_put(thread, item);
         break;
     case DPDK_NETDEV_FLOW_OFFLOAD_OP_MOD:
         op = "modify";
-        ret = dpif_offload_dpdk_offload_put(thread, item, true);
+        ret = dpif_offload_dpdk_offload_put(thread, item);
         break;
     case DPDK_NETDEV_FLOW_OFFLOAD_OP_DEL:
         op = "delete";
@@ -597,7 +495,6 @@ dpif_offload_dpdk_offload_threads_init(struct dpif_offload_dpdk *offload)
 
         thread = &offload->offload_threads[tid];
         mpsc_queue_init(&thread->queue);
-        cmap_init(&thread->megaflow_to_mark);
         atomic_init(&thread->enqueued_item, 0);
         mov_avg_cma_init(&thread->cma);
         mov_avg_ema_init(&thread->ema, 100);
@@ -652,8 +549,7 @@ dpif_offload_dpdk_flush_enqueue(struct dpif_offload_dpdk *offload,
  * Flow offload flush is done when a port is being deleted.
  * Right before this call executes, the offload API is disabled
  * for the port. This call must be made blocking until the
- * offload provider completed its job.
- */
+ * offload provider completed its job. */
 static void
 dpif_offload_dpdk_flush(struct dpif_offload_dpdk *offload,
                         struct netdev *netdev)
@@ -668,8 +564,7 @@ dpif_offload_dpdk_flush(struct dpif_offload_dpdk *offload,
      * Additionally, because the flush operation is blocking, it would
      * deadlock if multiple offload threads were blocking on several
      * different barriers. Only allow a single flush order in the offload
-     * queue at a time.
-     */
+     * queue at a time. */
     static struct ovs_mutex flush_mutex = OVS_MUTEX_INITIALIZER;
     static struct ovs_barrier barrier OVS_GUARDED_BY(flush_mutex);
 
@@ -751,8 +646,7 @@ dpif_offload_dpdk_port_del(struct dpif_offload *offload_, odp_port_t port_no)
     if (dpif_offload_is_offload_enabled() && port) {
         /* If hardware offload is enabled, we first need to flush (complete)
          * all pending flow operations, especially the pending delete ones,
-         * before we remove the netdev from the port_mgr list.
-         */
+         * before we remove the netdev from the port_mgr list. */
         dpif_offload_set_netdev_offload(port->netdev, NULL);
         dpif_offload_dpdk_flush(offload, port->netdev);
     }
@@ -837,6 +731,7 @@ dpif_offload_dpdk_open(const struct dpif_offload_class *offload_class,
     atomic_count_init(&offload->next_offload_thread_id, 0);
     atomic_init(&offload->offload_thread_shutdown, false);
     offload->flow_mark_pool = NULL;
+    offload->unreference_cb = NULL;
 
     *offload_ = &offload->offload;
     return 0;
@@ -866,7 +761,6 @@ dpif_offload_dpdk_close(struct dpif_offload *offload_)
         for (int i = 0; i < offload->offload_thread_count; i++) {
             xpthread_join(offload->offload_threads[i].thread, NULL);
             mpsc_queue_destroy(&offload->offload_threads[i].queue);
-            cmap_destroy(&offload->offload_threads[i].megaflow_to_mark);
         }
     }
 
@@ -1066,18 +960,19 @@ dpif_offload_dpdk_get_n_offloaded_by_thread(struct dpif_offload_dpdk *offload,
 static int
 dpif_offload_dpdk_netdev_hw_miss_packet_postprocess(
     const struct dpif_offload *offload_, struct netdev *netdev,
-    struct dp_packet *packet, ovs_u128 **ufid)
+    unsigned pmd_id, struct dp_packet *packet, void **flow_reference)
 {
     struct dpif_offload_dpdk *offload = dpif_offload_dpdk_cast(offload_);
 
-    return netdev_offload_dpdk_hw_miss_packet_recover(offload, netdev, packet,
-                                                      ufid);
+    return netdev_offload_dpdk_hw_miss_packet_recover(offload, netdev, pmd_id,
+                                                      packet, flow_reference);
 }
 
 static int
 dpif_offload_dpdk_netdev_flow_put(const struct dpif_offload *offload_,
                                   struct netdev *netdev OVS_UNUSED,
-                                  struct dpif_offload_flow_put *put)
+                                  struct dpif_offload_flow_put *put,
+                                  void **previous_flow_reference OVS_UNUSED)
 {
     struct dpif_offload_dpdk *offload = dpif_offload_dpdk_cast(offload_);
     struct dpdk_offload_thread_item *item;
@@ -1091,6 +986,8 @@ dpif_offload_dpdk_netdev_flow_put(const struct dpif_offload *offload_,
     flow_offload = &item->data->flow;
     flow_offload->in_port = put->in_port;
     flow_offload->ufid = *put->ufid;
+    flow_offload->pmd_id = put->pmd_id;
+    flow_offload->flow_reference = put->flow_reference;
     flow_offload->match = *put->match;
     flow_offload->actions = xmalloc(put->actions_len);
     nullable_memcpy(flow_offload->actions, put->actions, put->actions_len);
@@ -1120,10 +1017,30 @@ dpif_offload_dpdk_netdev_flow_del(const struct dpif_offload *offload_,
     flow_offload->in_port = del->in_port;
     flow_offload->requested_stats = !!del->stats;
     flow_offload->ufid = *del->ufid;
+    flow_offload->flow_reference = del->flow_reference;
+    flow_offload->pmd_id = del->pmd_id;
     flow_offload->callback = del->cb_data;
 
     dpif_offload_dpdk_offload_flow_enqueue(offload, item);
     return EINPROGRESS;
+}
+
+static void
+dpif_offload_dpdk_register_flow_unreference_cb(
+    const struct dpif_offload *offload_, dpif_offload_flow_unreference_cb *cb)
+{
+    struct dpif_offload_dpdk *offload = dpif_offload_dpdk_cast(offload_);
+
+    offload->unreference_cb = cb;
+}
+
+void
+dpif_offload_dpdk_flow_unreference(struct dpif_offload_dpdk *offload,
+                                   unsigned pmd_id, void *flow_reference)
+{
+    if (offload->unreference_cb) {
+        offload->unreference_cb(pmd_id, flow_reference);
+    }
 }
 
 static bool
@@ -1266,4 +1183,6 @@ struct dpif_offload_class dpif_offload_dpdk_class = {
     .netdev_flow_put = dpif_offload_dpdk_netdev_flow_put,
     .netdev_flow_del = dpif_offload_dpdk_netdev_flow_del,
     .netdev_flow_stats = dpif_offload_dpdk_netdev_flow_stats,
+    .register_flow_unreference_cb = \
+        dpif_offload_dpdk_register_flow_unreference_cb,
 };

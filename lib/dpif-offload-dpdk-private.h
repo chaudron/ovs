@@ -25,6 +25,11 @@ struct netdev;
  * used by the associated netdev offload provider, i.e., netdev-offload-dpdk.
  */
 unsigned int dpdk_offload_thread_id(void);
+void dpif_offload_dpdk_flow_unreference(struct dpif_offload_dpdk *offload,
+                                        unsigned pmd_id, void *flow_reference);
+uint32_t dpif_offload_dpdk_allocate_flow_mark(struct dpif_offload_dpdk *);
+void dpif_offload_dpdk_free_flow_mark(struct dpif_offload_dpdk *,
+                                      uint32_t flow_mark);
 struct netdev *dpif_offload_dpdk_get_netdev(
     const struct dpif_offload_dpdk *, odp_port_t port_no);
 void dpif_offload_dpdk_traverse_ports(

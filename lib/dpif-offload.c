@@ -1419,7 +1419,8 @@ dpif_offload_netdev_same_offload(const struct netdev *a,
 
 int
 dpif_offload_datapath_flow_put(const char *dpif_name,
-                               struct dpif_offload_flow_put *put)
+                               struct dpif_offload_flow_put *put,
+                               void **previous_flow_reference)
 {
     struct dpif_offload *offload;
     struct dp_offload *dp_offload;
@@ -1431,17 +1432,20 @@ dpif_offload_datapath_flow_put(const char *dpif_name,
     ovs_mutex_unlock(&dpif_offload_mutex);
 
     if (OVS_UNLIKELY(!dp_offload)) {
-        return 0;
+        *previous_flow_reference = NULL;
+        return EOPNOTSUPP;
     }
 
     netdev = dpif_offload_get_netdev_by_port_id_(dp_offload, &offload,
                                                  put->in_port);
 
     if (OVS_LIKELY(netdev && offload->class->netdev_flow_put)) {
-        return offload->class->netdev_flow_put(offload, netdev, put);
+        return offload->class->netdev_flow_put(offload, netdev, put,
+                                               previous_flow_reference);
     }
 
-    return 0;
+    *previous_flow_reference = NULL;
+    return EOPNOTSUPP;
 }
 
 int
@@ -1458,7 +1462,7 @@ dpif_offload_datapath_flow_del(const char *dpif_name,
     ovs_mutex_unlock(&dpif_offload_mutex);
 
     if (OVS_UNLIKELY(!dp_offload)) {
-        return 0;
+        return EOPNOTSUPP;
     }
 
     netdev = dpif_offload_get_netdev_by_port_id_(dp_offload, &offload,
@@ -1468,7 +1472,7 @@ dpif_offload_datapath_flow_del(const char *dpif_name,
         return offload->class->netdev_flow_del(offload, netdev, del);
     }
 
-    return 0;
+    return EOPNOTSUPP;
 }
 
 bool
@@ -1506,8 +1510,9 @@ dpif_offload_datapath_flow_stats(const char *dpif_name, odp_port_t in_port,
 
 int
 dpif_offload_netdev_hw_miss_packet_postprocess(struct netdev *netdev,
+                                               unsigned pmd_id,
                                                struct dp_packet *packet,
-                                               ovs_u128 **ufid)
+                                               void **flow_reference)
 {
     const struct dpif_offload *offload;
     bool postprocess_api_supported;
@@ -1532,13 +1537,32 @@ dpif_offload_netdev_hw_miss_packet_postprocess(struct netdev *netdev,
     }
 
     rc = offload->class->netdev_hw_miss_packet_postprocess(offload, netdev,
-                                                           packet, ufid);
+                                                           pmd_id, packet,
+                                                           flow_reference);
     if (rc == EOPNOTSUPP) {
         /* API unsupported by the port; avoid subsequent calls. */
         atomic_store_relaxed(&netdev->hw_info.postprocess_api_supported,
                              false);
     }
     return rc;
+}
+
+void
+dpif_offload_datapath_register_flow_unreference_cb(
+    struct dpif *dpif, dpif_offload_flow_unreference_cb *cb)
+{
+    struct dp_offload *dp_offload = dpif_offload_get_dp_offload(dpif);
+    const struct dpif_offload *offload;
+
+    /* In this case, we assert to make sure this initialization is done after
+     * the offload providers have been assigned to the dpif. */
+    ovs_assert(dp_offload);
+
+    LIST_FOR_EACH (offload, dpif_list_node, &dp_offload->offload_providers) {
+        if (offload->class->register_flow_unreference_cb) {
+            offload->class->register_flow_unreference_cb(offload, cb);
+        }
+    }
 }
 
 
