@@ -34,15 +34,20 @@ uint64_t netdev_offload_dpdk_flow_get_n_offloaded_by_thread(
     struct netdev *, unsigned int tid);
 int netdev_offload_dpdk_hw_miss_packet_recover(struct dpif_offload_dpdk *,
                                                struct netdev *,
+                                               unsigned pmd_id,
                                                struct dp_packet *,
-                                               ovs_u128 **ufid);
+                                               void **flow_reference);
 int netdev_offload_dpdk_flow_put(struct dpif_offload_dpdk *,
+                                 unsigned pmd_id, void *flow_reference,
                                  struct netdev *, struct match *,
                                  struct nlattr *actions, size_t actions_len,
-                                 const ovs_u128 *ufid, uint32_t flow_mark,
+                                 const ovs_u128 *ufid,
                                  odp_port_t orig_in_port,
+                                 void **previous_flow_reference,
                                  struct dpif_flow_stats *);
-int netdev_offload_dpdk_flow_del(struct netdev *, const ovs_u128 *ufid,
+int netdev_offload_dpdk_flow_del(struct dpif_offload_dpdk *, struct netdev *,
+                                 unsigned pmd_id, const ovs_u128 *ufid,
+                                 void **flow_reference,
                                  struct dpif_flow_stats *);
 int netdev_offload_dpdk_flow_get(struct netdev *, struct match *,
                                  struct nlattr **actions, const ovs_u128 *ufid,

@@ -103,6 +103,7 @@ struct dp_netdev_flow {
 
     bool dead;
     bool offloaded;
+    atomic_int offload_queue_depth;
     uint64_t simple_match_mark;  /* Unique flow mark for the simple match. */
     odp_port_t orig_in_port;
 

@@ -155,35 +155,39 @@ int dpif_offload_stats_get(struct dpif *, struct netdev_custom_stats **stats,
 bool dpif_offload_netdev_same_offload(const struct netdev *,
                                       const struct netdev *);
 int dpif_offload_netdev_hw_miss_packet_postprocess(struct netdev *,
+                                                   unsigned pmd_id,
                                                    struct dp_packet *,
-                                                   ovs_u128 **ufid);
+                                                   void **flow_reference);
 
-
 /* Flow modification callback definitions. */
-typedef void dpif_offload_flow_op_cb(void *aux_dp, void *aux_flow,
-                                     struct dpif_flow_stats *stats, int error);
+typedef void dpif_offload_flow_op_cb(void *aux, struct dpif_flow_stats *stats,
+                                     unsigned pmd_id, void *flow_reference,
+                                     void *old_flow_reference,
+                                     int error);
 
 /* Supporting structures for flow modification functions. */
 struct dpif_offload_flow_cb_data {
     dpif_offload_flow_op_cb *callback;
-    void *callback_aux_dp;
-    void *callback_aux_flow;
+    void *callback_aux;
 };
 
 struct dpif_offload_flow_put {
     bool modify;
     odp_port_t in_port;
     odp_port_t orig_in_port;  /* Originating in_port for tunneled packets. */
+    unsigned pmd_id;
     const ovs_u128 *ufid;
     struct match *match;
     const struct nlattr *actions;
     size_t actions_len;
     struct dpif_flow_stats *stats;
+    void *flow_reference;
     struct dpif_offload_flow_cb_data cb_data;
 };
 
 struct dpif_offload_flow_del {
     odp_port_t in_port;
+    unsigned pmd_id;
     const ovs_u128 *ufid;
     struct dpif_flow_stats *stats;
     struct dpif_offload_flow_cb_data cb_data;
@@ -191,9 +195,11 @@ struct dpif_offload_flow_del {
 
 /* Flow modification functions, which can be used in the fast path. */
 int dpif_offload_datapath_flow_put(const char *dpif_name,
-                                   struct dpif_offload_flow_put *);
+                                   struct dpif_offload_flow_put *,
+                                   void **previous_flow_reference);
 int dpif_offload_datapath_flow_del(const char *dpif_name,
-                                   struct dpif_offload_flow_del *);
+                                   struct dpif_offload_flow_del *,
+                                   void **flow_reference);
 bool dpif_offload_datapath_flow_stats(const char *dpif_name,
                                       odp_port_t in_port, const ovs_u128 *ufid,
                                       struct dpif_flow_stats *,
@@ -201,10 +207,13 @@ bool dpif_offload_datapath_flow_stats(const char *dpif_name,
 
 static inline void dpif_offload_datapath_flow_op_continue(
     struct dpif_offload_flow_cb_data *cb, struct dpif_flow_stats *stats,
+    unsigned pmd_id, void *flow_reference, void *old_flow_reference,
     int error)
 {
     if (cb && cb->callback) {
-        cb->callback(cb->callback_aux_dp, cb->callback_aux_flow, stats, error);
+
+        cb->callback(cb->callback_aux, stats, pmd_id, flow_reference,
+                     old_flow_reference, error);
     }
 }
 
