@@ -33,19 +33,27 @@
 
 VLOG_DEFINE_THIS_MODULE(dpif_offload_dummy);
 
+struct pmd_id_data {
+    struct hmap_node node;
+    void *flow_reference;
+    unsigned pmd_id;
+};
+
 struct dummy_offloaded_flow {
     struct hmap_node node;
     struct match match;
     ovs_u128 ufid;
     uint32_t mark;
-    void *flow_reference;
-};
+
+    /* The pmd_id_map below is also protected by the port_mutex. */
+    struct hmap pmd_id_map;
+ };
 
 struct dpif_offload_dummy {
     struct dpif_offload offload;
     struct dpif_offload_port_mgr *port_mgr;
-
     struct id_fpool *flow_mark_pool;
+    dpif_offload_flow_unreference_cb *unreference_cb;
 
     /* Configuration specific variables. */
     struct ovsthread_once once_enable; /* Track first-time enablement. */
@@ -57,6 +65,10 @@ struct dpif_offload_dummy_port {
     struct ovs_mutex port_mutex; /* Protect all below members. */
     struct hmap offloaded_flows OVS_GUARDED;
 };
+
+static void dpif_offload_dummy_flow_unreference(struct dpif_offload_dummy *,
+                                                unsigned pmd_id,
+                                                void *flow_reference);
 
 static uint32_t
 dpif_offload_dummy_allocate_flow_mark(struct dpif_offload_dummy *offload_dummy)
@@ -104,20 +116,165 @@ dpif_offload_dummy_flow_hash(const ovs_u128 *ufid)
     return ufid->u32[0];
 }
 
+static struct pmd_id_data *
+dpif_offload_dummy_find_flow_pmd_data(
+    struct dpif_offload_dummy_port *port OVS_UNUSED,
+    struct dummy_offloaded_flow *off_flow, unsigned pmd_id)
+    OVS_REQUIRES(port->port_mutex)
+{
+    size_t hash = hash_int(pmd_id, 0);
+    struct pmd_id_data *data;
+
+    HMAP_FOR_EACH_WITH_HASH (data, node, hash, &off_flow->pmd_id_map) {
+        if (data->pmd_id == pmd_id) {
+            return data;
+        }
+    }
+    return NULL;
+}
+
+static void
+dpif_offload_dummy_add_flow_pmd_data(
+    struct dpif_offload_dummy_port *port OVS_UNUSED,
+    struct dummy_offloaded_flow *off_flow, unsigned pmd_id,
+    void *flow_reference) OVS_REQUIRES(port->port_mutex)
+{
+    struct pmd_id_data *pmd_data = xmalloc(sizeof *pmd_data);
+
+    pmd_data->pmd_id = pmd_id;
+    pmd_data->flow_reference = flow_reference;
+    hmap_insert(&off_flow->pmd_id_map, &pmd_data->node,
+                hash_int(pmd_id, 0));
+}
+
+static void
+dpif_offload_dummy_update_add_flow_pmd_data(
+    struct dpif_offload_dummy_port *port,
+    struct dummy_offloaded_flow *off_flow, unsigned pmd_id,
+    void *flow_reference, void **previous_flow_reference)
+    OVS_REQUIRES(port->port_mutex)
+{
+    struct pmd_id_data *data = dpif_offload_dummy_find_flow_pmd_data(port,
+                                                                     off_flow,
+                                                                     pmd_id);
+
+    if (data) {
+        *previous_flow_reference = data->flow_reference;
+        data->flow_reference = flow_reference;
+    } else {
+        dpif_offload_dummy_add_flow_pmd_data(port, off_flow, pmd_id,
+                                             flow_reference);
+        *previous_flow_reference = NULL;
+    }
+}
+
+static bool
+dpif_offload_dummy_del_flow_pmd_data(
+    struct dpif_offload_dummy_port *port OVS_UNUSED,
+    struct dummy_offloaded_flow *off_flow, unsigned pmd_id,
+    void *flow_reference) OVS_REQUIRES(port->port_mutex)
+{
+    size_t hash = hash_int(pmd_id, 0);
+    struct pmd_id_data *data;
+
+    HMAP_FOR_EACH_WITH_HASH (data, node, hash, &off_flow->pmd_id_map) {
+        if (data->pmd_id == pmd_id && data->flow_reference == flow_reference) {
+            hmap_remove(&off_flow->pmd_id_map, &data->node);
+            free(data);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void
+dpif_offload_dummy_cleanup_flow_pmd_data(
+    struct dpif_offload_dummy *offload,
+    struct dpif_offload_dummy_port *port OVS_UNUSED,
+    struct dummy_offloaded_flow *off_flow) OVS_REQUIRES(port->port_mutex)
+{
+    struct pmd_id_data *data;
+
+     HMAP_FOR_EACH_SAFE (data, node, &off_flow->pmd_id_map) {
+         hmap_remove(&off_flow->pmd_id_map, &data->node);
+
+         dpif_offload_dummy_flow_unreference(offload, data->pmd_id,
+                                             data->flow_reference);
+         free(data);
+     }
+}
+
 static struct dummy_offloaded_flow *
-dpif_offload_dummy_find_offloaded_flow(const struct hmap *offloaded_flows,
+dpif_offload_dummy_add_flow(struct dpif_offload_dummy_port *port,
+                            const ovs_u128 *ufid, unsigned pmd_id,
+                            void *flow_reference, uint32_t mark)
+    OVS_REQUIRES(port->port_mutex)
+{
+    struct dummy_offloaded_flow *off_flow = xzalloc(sizeof *off_flow);
+
+    off_flow->mark = mark;
+    memcpy(&off_flow->ufid, ufid, sizeof off_flow->ufid);
+    hmap_init(&off_flow->pmd_id_map);
+    dpif_offload_dummy_add_flow_pmd_data(port, off_flow, pmd_id,
+                                         flow_reference);
+
+    hmap_insert(&port->offloaded_flows, &off_flow->node,
+                dpif_offload_dummy_flow_hash(ufid));
+
+    return off_flow;
+}
+
+static void
+dpif_offload_dummy_free_flow(struct dpif_offload_dummy_port *port,
+                             struct dummy_offloaded_flow *off_flow,
+                             bool remote_from_port)
+    OVS_REQUIRES(port->port_mutex)
+{
+    if (remote_from_port) {
+        hmap_remove(&port->offloaded_flows, &off_flow->node);
+    }
+    ovs_assert(!hmap_count(&off_flow->pmd_id_map));
+
+    hmap_destroy(&off_flow->pmd_id_map);
+    free(off_flow);
+}
+
+static struct dummy_offloaded_flow *
+dpif_offload_dummy_find_offloaded_flow(struct dpif_offload_dummy_port *port,
                                        const ovs_u128 *ufid)
+    OVS_REQUIRES(port->port_mutex)
 {
     uint32_t hash = dpif_offload_dummy_flow_hash(ufid);
     struct dummy_offloaded_flow *data;
 
-    HMAP_FOR_EACH_WITH_HASH (data, node, hash, offloaded_flows) {
+    HMAP_FOR_EACH_WITH_HASH (data, node, hash, &port->offloaded_flows) {
         if (ovs_u128_equals(*ufid, data->ufid)) {
             return data;
         }
     }
 
     return NULL;
+}
+
+static struct dummy_offloaded_flow *
+dpif_offload_dummy_find_offloaded_flow_and_update(
+    struct dpif_offload_dummy_port *port, const ovs_u128 *ufid,
+    unsigned pmd_id, void *new_flow_reference, void **previous_flow_reference)
+    OVS_REQUIRES(port->port_mutex)
+{
+    struct dummy_offloaded_flow *off_flow;
+
+    off_flow = dpif_offload_dummy_find_offloaded_flow(port, ufid);
+    if (!off_flow) {
+        return NULL;
+    }
+
+    dpif_offload_dummy_update_add_flow_pmd_data(port, off_flow, pmd_id,
+                                                new_flow_reference,
+                                                previous_flow_reference);
+
+    return off_flow;
 }
 
 static void
@@ -135,20 +292,44 @@ dpif_offload_dummy_cleanup_offload(
     dpif_offload_set_netdev_offload(port->netdev, NULL);
 }
 
-
 static void
-dpif_offload_dummy_free_port(struct dpif_offload_dummy_port *port)
+dpif_offload_dummy_free_port_(struct dpif_offload_dummy *offload,
+                              struct dpif_offload_dummy_port *port)
 {
     struct dummy_offloaded_flow *off_flow;
 
     ovs_mutex_lock(&port->port_mutex);
     HMAP_FOR_EACH_POP (off_flow, node, &port->offloaded_flows) {
-        free(off_flow);
+        dpif_offload_dummy_cleanup_flow_pmd_data(offload, port, off_flow);
+        dpif_offload_dummy_free_flow(port, off_flow, false);
     }
     hmap_destroy(&port->offloaded_flows);
     ovs_mutex_unlock(&port->port_mutex);
     ovs_mutex_destroy(&port->port_mutex);
     free(port);
+}
+
+struct free_port_rcu {
+    struct dpif_offload_dummy *offload;
+    struct dpif_offload_dummy_port *port;
+};
+
+static void
+dpif_offload_dummy_free_port_rcu(struct free_port_rcu *fpc)
+{
+    dpif_offload_dummy_free_port_(fpc->offload, fpc->port);
+    free(fpc);
+}
+
+static void
+dpif_offload_dummy_free_port(struct dpif_offload_dummy *offload,
+                             struct dpif_offload_dummy_port *port)
+{
+    struct free_port_rcu *fpc = xmalloc(sizeof *fpc);
+
+    fpc->offload = offload;
+    fpc->port = port;
+    ovsrcu_postpone(dpif_offload_dummy_free_port_rcu, fpc);
 }
 
 static int
@@ -173,7 +354,7 @@ dpif_offload_dummy_port_add(struct dpif_offload *dpif_offload,
         return 0;
     }
 
-    dpif_offload_dummy_free_port(port);
+    dpif_offload_dummy_free_port_(offload_dummy, port);
     return EEXIST;
 }
 
@@ -197,7 +378,7 @@ dpif_offload_dummy_port_del(struct dpif_offload *dpif_offload,
         }
         netdev_close(port->netdev);
 
-        ovsrcu_postpone(dpif_offload_dummy_free_port, dummy_port);
+        dpif_offload_dummy_free_port(offload_dummy, dummy_port);
     }
     return 0;
 }
@@ -262,6 +443,7 @@ dpif_offload_dummy_open(const struct dpif_offload_class *offload_class,
     offload_dummy->once_enable = (struct ovsthread_once)
         OVSTHREAD_ONCE_INITIALIZER;
     offload_dummy->flow_mark_pool = NULL;
+    offload_dummy->unreference_cb = NULL;
 
     *dpif_offload = &offload_dummy->offload;
     return 0;
@@ -441,8 +623,6 @@ dpif_offload_dummy_netdev_flow_put(const struct dpif_offload *offload_,
     bool modify = true;
     int error = 0;
 
-    *previous_flow_reference = NULL;
-
     port = dpif_offload_dummy_get_port_by_netdev(offload_, netdev);
     if (!port) {
         error = ENODEV;
@@ -451,8 +631,10 @@ dpif_offload_dummy_netdev_flow_put(const struct dpif_offload *offload_,
 
     ovs_mutex_lock(&port->port_mutex);
 
-    off_flow = dpif_offload_dummy_find_offloaded_flow(&port->offloaded_flows,
-                                                      put->ufid);
+    off_flow = dpif_offload_dummy_find_offloaded_flow_and_update(
+        port, put->ufid, put->pmd_id, put->flow_reference,
+        previous_flow_reference);
+
     if (!off_flow) {
         /* Create new offloaded flow. */
         uint32_t mark = dpif_offload_dummy_allocate_flow_mark(offload);
@@ -462,16 +644,10 @@ dpif_offload_dummy_netdev_flow_put(const struct dpif_offload *offload_,
             goto exit_unlock;
         }
 
-        off_flow = xzalloc(sizeof *off_flow);
-        off_flow->mark = mark;
-        off_flow->flow_reference = put->flow_reference;
-        memcpy(&off_flow->ufid, put->ufid, sizeof *put->ufid);
-        hmap_insert(&port->offloaded_flows, &off_flow->node,
-                    dpif_offload_dummy_flow_hash(put->ufid));
+        off_flow = dpif_offload_dummy_add_flow(port, put->ufid, put->pmd_id,
+                                               put->flow_reference, mark);
         modify = false;
-    } else {
-        *previous_flow_reference = off_flow->flow_reference;
-        off_flow->flow_reference = put->flow_reference;
+        *previous_flow_reference = NULL;
     }
     memcpy(&off_flow->match, put->match, sizeof *put->match);
 
@@ -503,7 +679,7 @@ exit:
         memset(put->stats, 0, sizeof *put->stats);
     }
 
-    dpif_offload_dummy_log_operation(put->modify ? "modify" : "add", error,
+    dpif_offload_dummy_log_operation(modify ? "modify" : "add", error,
                                      put->ufid);
     return error;
 }
@@ -527,17 +703,23 @@ dpif_offload_dummy_netdev_flow_del(const struct dpif_offload *offload_,
 
     ovs_mutex_lock(&port->port_mutex);
 
-    off_flow = dpif_offload_dummy_find_offloaded_flow(&port->offloaded_flows,
-                                                      del->ufid);
+    off_flow = dpif_offload_dummy_find_offloaded_flow(port, del->ufid);
     if (!off_flow) {
         error = "No such flow.";
         goto exit_unlock;
     }
 
+    if (!dpif_offload_dummy_del_flow_pmd_data(port, off_flow, del->pmd_id,
+                                              del->flow_reference)) {
+        error = "No such flow with pmd_id and reference.";
+        goto exit_unlock;
+    }
+
     mark = off_flow->mark;
-    hmap_remove(&port->offloaded_flows, &off_flow->node);
-    dpif_offload_dummy_free_flow_mark(offload, mark);
-    free(off_flow);
+    if (!hmap_count(&off_flow->pmd_id_map)) {
+        dpif_offload_dummy_free_flow_mark(offload, mark);
+        dpif_offload_dummy_free_flow(port, off_flow, true);
+    }
 
 exit_unlock:
     ovs_mutex_unlock(&port->port_mutex);
@@ -585,8 +767,7 @@ dpif_offload_dummy_netdev_flow_stats(const struct dpif_offload *offload_,
     }
 
     ovs_mutex_lock(&port->port_mutex);
-    off_flow = dpif_offload_dummy_find_offloaded_flow(&port->offloaded_flows,
-                                                      ufid);
+    off_flow = dpif_offload_dummy_find_offloaded_flow(port, ufid);
     ovs_mutex_unlock(&port->port_mutex);
 
     memset(stats, 0, sizeof *stats);
@@ -595,6 +776,24 @@ dpif_offload_dummy_netdev_flow_stats(const struct dpif_offload *offload_,
     attrs->dp_extra_info = NULL;
 
     return off_flow ? true : false;
+}
+
+static void
+dpif_offload_dummy_register_flow_unreference_cb(
+    const struct dpif_offload *offload_, dpif_offload_flow_unreference_cb *cb)
+{
+    struct dpif_offload_dummy *offload = dpif_offload_dummy_cast(offload_);
+
+    offload->unreference_cb = cb;
+}
+
+static void
+dpif_offload_dummy_flow_unreference(struct dpif_offload_dummy *offload,
+                                    unsigned pmd_id, void *flow_reference)
+{
+    if (offload->unreference_cb) {
+        offload->unreference_cb(pmd_id, flow_reference);
+    }
 }
 
 void
@@ -675,6 +874,8 @@ dpif_offload_dummy_netdev_simulate_offload(struct netdev *netdev,
         .netdev_flow_put = dpif_offload_dummy_netdev_flow_put,     \
         .netdev_flow_del = dpif_offload_dummy_netdev_flow_del,     \
         .netdev_flow_stats = dpif_offload_dummy_netdev_flow_stats, \
+        .register_flow_unreference_cb =                            \
+            dpif_offload_dummy_register_flow_unreference_cb,       \
 }
 
 DEFINE_DPIF_DUMMY_CLASS(dpif_offload_dummy_class, "dummy");
