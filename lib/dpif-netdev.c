@@ -3526,10 +3526,9 @@ offload_flow_put_resume_cb(void *aux, struct dpif_flow_stats *stats OVS_UNUSED,
 static void
 offload_flow_put(struct dp_netdev_pmd_thread *pmd, struct dp_netdev_flow *flow,
                  struct match *match, const struct nlattr *actions,
-                 size_t actions_len, bool modify)
+                 size_t actions_len)
 {
     struct dpif_offload_flow_put put = {
-        .modify = modify,
         .in_port = match->flow.in_port.odp_port,
         .orig_in_port = flow->orig_in_port,
         .pmd_id = pmd->core_id,
@@ -3635,7 +3634,7 @@ dp_netdev_flow_add(struct dp_netdev_pmd_thread *pmd,
         dp_netdev_simple_match_insert(pmd, flow);
     }
 
-    offload_flow_put(pmd, flow, match, actions, actions_len, false);
+    offload_flow_put(pmd, flow, match, actions, actions_len);
     log_netdev_flow_change(flow, match, NULL, actions, actions_len);
 
     return flow;
@@ -3696,7 +3695,7 @@ flow_put_on_pmd(struct dp_netdev_pmd_thread *pmd,
             ovsrcu_set(&netdev_flow->actions, new_actions);
 
             offload_flow_put(pmd, netdev_flow, match, put->actions,
-                             put->actions_len, true);
+                             put->actions_len);
             log_netdev_flow_change(netdev_flow, match, old_actions,
                                    put->actions, put->actions_len);
 

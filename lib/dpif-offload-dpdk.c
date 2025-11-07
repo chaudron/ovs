@@ -44,8 +44,7 @@ enum dpdk_offload_type {
 };
 
 enum {
-    DPDK_NETDEV_FLOW_OFFLOAD_OP_ADD,
-    DPDK_NETDEV_FLOW_OFFLOAD_OP_MOD,
+    DPDK_NETDEV_FLOW_OFFLOAD_OP_PUT,
     DPDK_NETDEV_FLOW_OFFLOAD_OP_DEL,
 };
 
@@ -366,12 +365,8 @@ dpif_offload_dpdk_offload_flow(struct dpdk_offload_thread *thread,
     int ret;
 
     switch (flow_offload->op) {
-    case DPDK_NETDEV_FLOW_OFFLOAD_OP_ADD:
-        op = "add";
-        ret = dpif_offload_dpdk_offload_put(thread, item);
-        break;
-    case DPDK_NETDEV_FLOW_OFFLOAD_OP_MOD:
-        op = "modify";
+    case DPDK_NETDEV_FLOW_OFFLOAD_OP_PUT:
+        op = "put";
         ret = dpif_offload_dpdk_offload_put(thread, item);
         break;
     case DPDK_NETDEV_FLOW_OFFLOAD_OP_DEL:
@@ -980,8 +975,7 @@ dpif_offload_dpdk_netdev_flow_put(const struct dpif_offload *offload_,
     struct dpdk_offload_flow_item *flow_offload;
 
     item = dpif_offload_dpdk_alloc_flow_offload(
-        put->modify ? DPDK_NETDEV_FLOW_OFFLOAD_OP_MOD
-                    : DPDK_NETDEV_FLOW_OFFLOAD_OP_ADD);
+        DPDK_NETDEV_FLOW_OFFLOAD_OP_PUT);
     item->timestamp = dpif_offload_dpdk_get_timestamp();
 
     flow_offload = &item->data->flow;

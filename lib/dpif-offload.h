@@ -176,7 +176,6 @@ struct dpif_offload_flow_cb_data {
 };
 
 struct dpif_offload_flow_put {
-    bool modify;
     odp_port_t in_port;
     odp_port_t orig_in_port;  /* Originating in_port for tunneled packets. */
     unsigned pmd_id;
