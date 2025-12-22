@@ -1817,7 +1817,10 @@ netdev_dummy_queue_packet(struct netdev_dummy *dummy, struct dp_packet *packet,
         ovs_pcap_write(dummy->rxq_pcap, packet);
     }
 
-    dpif_offload_dummy_netdev_simulate_offload(&dummy->up, packet, flow);
+    if (dpif_offload_dummy_netdev_simulate_offload(&dummy->up, packet, flow)) {
+        /* Packet was stolen for full HW offload simulation. */
+        return;
+    }
 
     prev = NULL;
     LIST_FOR_EACH (rx, node, &dummy->rxes) {
