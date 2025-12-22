@@ -695,7 +695,6 @@ netdev_dummy_run(const struct netdev_class *netdev_class)
         ovs_mutex_lock(&dev->mutex);
         dummy_packet_conn_run(dev);
         ovs_mutex_unlock(&dev->mutex);
-        dummy_netdev_hw_offload_run(&dev->up);
     }
     ovs_mutex_unlock(&dummy_list_mutex);
 }

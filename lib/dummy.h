@@ -49,6 +49,5 @@ void ofpact_dummy_enable(void);
 bool is_dummy_netdev_class(const struct netdev_class *);
 bool dummy_netdev_simulate_offload(struct netdev *, struct dp_packet *,
                                    int queue_id, struct flow *);
-void dummy_netdev_hw_offload_run(struct netdev *);
 
 #endif /* dummy.h */

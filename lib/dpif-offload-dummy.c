@@ -972,15 +972,16 @@ dummy_netdev_simulate_offload(struct netdev *netdev, struct dp_packet *packet,
     return packet_stolen;
 }
 
-void
-dummy_netdev_hw_offload_run(struct netdev *netdev)
+static void
+dummy_pmd_thread_work_cb(unsigned core_id OVS_UNUSED, int numa_id OVS_UNUSED,
+                         void *ctx)
 {
-    const struct dpif_offload *offload = ovsrcu_get(
-        const struct dpif_offload *, &netdev->dpif_offload);
+    const struct dpif_offload *offload = ctx;
     struct dpif_offload_port *port_;
 
-    if (!dpif_offload_enabled() || !offload
-        || strcmp(dpif_offload_type(offload), "dummy")) {
+    COVERAGE_INC(dummy_offload_do_work);
+
+    if (!offload) {
         return;
     }
 
@@ -1024,13 +1025,6 @@ dummy_netdev_hw_offload_run(struct netdev *netdev)
 }
 
 static void
-dummy_pmd_thread_work_cb(unsigned core_id OVS_UNUSED, int numa_id OVS_UNUSED,
-                         void *ctx OVS_UNUSED)
-{
-    COVERAGE_INC(dummy_offload_do_work);
-}
-
-static void
 dummy_pmd_thread_lifecycle(const struct dpif_offload *dpif_offload,
                            bool exit, unsigned core_id, int numa_id,
                            dpif_offload_pmd_thread_work_cb **callback,
@@ -1050,9 +1044,9 @@ dummy_pmd_thread_lifecycle(const struct dpif_offload *dpif_offload,
     ovs_assert(!*callback || *callback == dummy_pmd_thread_work_cb);
 
     if (exit) {
-        free(*ctx);
+        *ctx = NULL;
     } else {
-        *ctx = *ctx ? *ctx : xstrdup("DUMMY_OFFLOAD_WORK");
+        *ctx = (void *) dpif_offload;
         *callback = dummy_pmd_thread_work_cb;
     }
 }
