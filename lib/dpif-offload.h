@@ -114,8 +114,10 @@ bool dpif_offload_netdev_same_offload(const struct netdev *,
 int dpif_offload_netdev_hw_post_process(struct netdev *, unsigned pmd_id,
                                         struct dp_packet *,
                                         void **flow_reference);
+bool dpif_offload_netdev_udp_tnl_get_src_port(const struct netdev *,
+                                              const struct dp_packet *,
+                                              ovs_be16 *src_port);
 
-
 /* Callback invoked when a hardware flow offload operation (put/del) completes.
  * This callback is used for asynchronous flow offload operations.  When the
  * offload provider cannot complete an operation synchronously (returns
