@@ -8374,8 +8374,9 @@ push_tnl_action(const struct dp_netdev_pmd_thread *pmd,
                 const struct nlattr *attr,
                 struct dp_packet_batch *batch)
 {
-    struct tx_port *tun_port;
     const struct ovs_action_push_tnl *data;
+    const struct netdev *output = NULL;
+    struct tx_port *tun_port;
     int err;
 
     data = nl_attr_get(attr);
@@ -8385,7 +8386,17 @@ push_tnl_action(const struct dp_netdev_pmd_thread *pmd,
         err = -EINVAL;
         goto error;
     }
-    err = netdev_push_header(tun_port->port->netdev, batch, data);
+
+    if (dpif_offload_enabled()) {
+        struct tx_port *out_port = pmd_send_port_cache_lookup(
+                                       pmd, data->out_port);
+
+        if (out_port) {
+            output = out_port->port->netdev;
+        }
+    }
+
+    err = netdev_push_header(tun_port->port->netdev, output, batch, data);
     if (!err) {
         return 0;
     }
