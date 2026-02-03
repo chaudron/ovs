@@ -144,6 +144,7 @@ lldp
 llvm
 localnet
 lockless
+lookups
 loopback
 malloc
 mbps
