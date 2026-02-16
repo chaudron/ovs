@@ -643,6 +643,103 @@ dummy_offload_udp_tnl_get_src_port(
     return true;
 }
 
+static inline uint32_t
+fnv1a_add(uint32_t hash, uint32_t word)
+{
+    const uint32_t prime = 16777619U;
+    const uint8_t *data = (const uint8_t *) &word;
+
+    for (size_t i = 0; i < sizeof(uint32_t); i++) {
+        hash ^= data[i];
+        hash *= prime;
+    }
+    return hash;
+}
+
+/* Add a 64-bit word to FNV-1a hash. */
+static inline uint32_t
+fnv1a_add64(uint32_t hash, uint64_t word)
+{
+    return fnv1a_add(fnv1a_add(hash, word), word >> 32);
+}
+
+static uint32_t
+fnv1a_init(uint32_t seed)
+{
+    const uint32_t fnv_offset_basis = 2166136261U;
+
+    return seed ? fnv1a_add(fnv_offset_basis, seed) : fnv_offset_basis;
+}
+
+static bool
+get_l4_sym_hash(struct flow *flow, uint32_t seed, uint32_t *hash_)
+{
+    struct ds ds = DS_EMPTY_INITIALIZER;
+    uint32_t hash = fnv1a_init(seed);
+
+    if (flow->dl_type == htons(ETH_TYPE_IP)) {
+        hash = fnv1a_add(hash,
+                        (OVS_FORCE uint32_t) (flow->nw_src ^ flow->nw_dst));
+    } else if (flow->dl_type == htons(ETH_TYPE_IPV6)) {
+        /* IPv6 addresses are 64-bit aligned inside struct flow. */
+        const uint64_t *a = ALIGNED_CAST(uint64_t *, flow->ipv6_src.s6_addr);
+        const uint64_t *b = ALIGNED_CAST(uint64_t *, flow->ipv6_dst.s6_addr);
+
+        for (int i = 0; i < sizeof flow->ipv6_src / sizeof *a; i++) {
+            hash = fnv1a_add64(hash, a[i] ^ b[i]);
+        }
+    } else {
+        return false;
+    }
+
+    hash = fnv1a_add(hash, flow->nw_proto);
+    if (!(flow->nw_frag & FLOW_NW_FRAG_MASK)
+        && (flow->nw_proto == IPPROTO_TCP
+            || flow->nw_proto == IPPROTO_SCTP
+            || flow->nw_proto == IPPROTO_UDP)) {
+        hash = fnv1a_add(hash,
+                         (OVS_FORCE uint16_t)(flow->tp_src ^ flow->tp_dst));
+    }
+
+    ds_put_format(&ds, "l4_sym_hash: %8.8x for packet: ", hash);
+    flow_format(&ds, flow, NULL);
+    VLOG_DBG("%s", ds_cstr(&ds));
+    ds_destroy(&ds);
+
+    *hash_ = hash;
+    return true;
+}
+
+static bool
+dummy_offload_get_dp_hash(const struct dpif_offload *offload OVS_UNUSED,
+                          const struct netdev *ingress_netdev OVS_UNUSED,
+                          const struct dp_packet *packet,
+                          const struct ovs_action_hash *hash_act,
+                          uint32_t *hash)
+{
+    switch ((enum ovs_hash_alg) hash_act->hash_alg) {
+    case OVS_HASH_ALG_L4:
+    case OVS_HASH_ALG_SYM_L4: {
+        /* For our implementation we will just use a symmetric L4 hash.
+         * Note that we will use our own hash that will give consistent results
+         * across all platforms/compilers. */
+        struct flow flow;
+
+        flow_extract(CONST_CAST(struct dp_packet *, packet), &flow);
+        if (!get_l4_sym_hash(&flow, hash_act->hash_basis, hash)) {
+            return false;
+        }
+        break;
+    }
+
+    case __OVS_HASH_MAX:
+    default:
+        OVS_NOT_REACHED();
+    }
+
+    return true;
+}
+
 static bool
 dummy_offload_are_all_actions_supported(const struct dpif_offload *offload_,
                                         odp_port_t in_odp,
@@ -1189,6 +1286,7 @@ dummy_pmd_thread_lifecycle(const struct dpif_offload *dpif_offload,
         .get_netdev = dummy_offload_get_netdev,                             \
         .netdev_hw_post_process = dummy_offload_hw_post_process,            \
         .netdev_udp_tnl_get_src_port = dummy_offload_udp_tnl_get_src_port,  \
+        .netdev_get_dp_hash = dummy_offload_get_dp_hash,                    \
         .netdev_flow_put = dummy_flow_put,                                  \
         .netdev_flow_del = dummy_flow_del,                                  \
         .netdev_flow_stats = dummy_flow_stats,                              \
