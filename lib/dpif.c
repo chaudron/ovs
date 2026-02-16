@@ -1184,7 +1184,8 @@ struct dpif_execute_helper_aux {
  * meaningful. */
 static void
 dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
-                       const struct nlattr *action, bool should_steal)
+                       const struct nlattr *action, bool should_steal,
+                       bool *handled)
 {
     struct dpif_execute_helper_aux *aux = aux_;
     int type = nl_attr_type(action);
@@ -1264,6 +1265,11 @@ dpif_execute_helper_cb(void *aux_, struct dp_packet_batch *packets_,
     }
 
     case OVS_ACTION_ATTR_HASH:
+        /* For this action, no dp-specific handling is needed; fall back to
+         * the default software handling. */
+        *handled = false;
+        break;
+
     case OVS_ACTION_ATTR_PUSH_VLAN:
     case OVS_ACTION_ATTR_POP_VLAN:
     case OVS_ACTION_ATTR_PUSH_MPLS:

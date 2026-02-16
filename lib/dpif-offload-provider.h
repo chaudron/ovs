@@ -292,6 +292,18 @@ struct dpif_offload_class {
                                         const struct dp_packet *packet,
                                         ovs_be16 *src_port);
 
+    /* Allows the offload provider to override the default dp-hash calculation.
+     * Called during packet processing to determine the hash value for datapath
+     * operations (e.g., load balancing, packet distribution).
+     *
+     * If implemented, should return true and set 'hash' to the desired hash
+     * value.  If not implemented or if default behavior is desired, should
+     * return false to use the standard hash calculation. */
+    bool (*netdev_get_dp_hash)(const struct dpif_offload *,
+                               const struct netdev *ingress_netdev,
+                               const struct dp_packet *,
+                               const struct ovs_action_hash *, uint32_t *hash);
+
     /* Add or modify the specified flow directly in the offload datapath.
      * The actual implementation may choose to handle the offload
      * asynchronously by returning EINPROGRESS and invoking the supplied

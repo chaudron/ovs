@@ -1484,6 +1484,25 @@ dpif_offload_netdev_udp_tnl_get_src_port(const struct netdev *ingress_netdev,
                                                        packet, src_port);
 }
 
+bool
+dpif_offload_netdev_get_dp_hash(const struct netdev *ingress_netdev,
+                                const struct dp_packet *packet,
+                                const struct ovs_action_hash *hash_action,
+                                uint32_t *hash)
+{
+    const struct dpif_offload *offload;
+
+    offload = ovsrcu_get(const struct dpif_offload *,
+                         &ingress_netdev->dpif_offload);
+
+    if (OVS_UNLIKELY(!offload) || !offload->class->netdev_get_dp_hash) {
+        return false;
+    }
+
+    return offload->class->netdev_get_dp_hash(offload, ingress_netdev, packet,
+                                              hash_action, hash);
+}
+
 void
 dpif_offload_datapath_register_flow_unreference_cb(
     struct dpif *dpif, dpif_offload_flow_unreference_cb *cb)
