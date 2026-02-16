@@ -862,13 +862,13 @@ requires_datapath_assistance(const struct nlattr *a)
     case OVS_ACTION_ATTR_CT:
     case OVS_ACTION_ATTR_METER:
     case OVS_ACTION_ATTR_PSAMPLE:
+    case OVS_ACTION_ATTR_HASH:
         return true;
 
     case OVS_ACTION_ATTR_SET:
     case OVS_ACTION_ATTR_SET_MASKED:
     case OVS_ACTION_ATTR_PUSH_VLAN:
     case OVS_ACTION_ATTR_POP_VLAN:
-    case OVS_ACTION_ATTR_HASH:
     case OVS_ACTION_ATTR_PUSH_MPLS:
     case OVS_ACTION_ATTR_POP_MPLS:
     case OVS_ACTION_ATTR_TRUNC:
@@ -1066,14 +1066,17 @@ odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
         bool last_action = (left <= NLA_ALIGN(a->nla_len));
 
         if (requires_datapath_assistance(a)) {
+            bool handled = true;
+
             if (dp_execute_action) {
                 /* Allow 'dp_execute_action' to steal the packet data if we do
                  * not need it any more. */
                 bool should_steal = steal && last_action;
 
-                dp_execute_action(dp, batch, a, should_steal);
+                handled = dp_execute_action(dp, batch, a, should_steal);
 
-                if (last_action || dp_packet_batch_is_empty(batch)) {
+                if (handled
+                    && (last_action || dp_packet_batch_is_empty(batch))) {
                     /* We do not need to free the packets.
                      * Either dp_execute_actions() has stolen them
                      * or the batch is freed due to errors. In either
@@ -1082,7 +1085,11 @@ odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
                     return;
                 }
             }
-            continue;
+            if (handled) {
+                continue;
+            }
+            /* If not handled by the datapath for some specific reason,
+             * fall through to the non-datapath-assisted handling. */
         }
 
         /* If type is set in the active actions implementation, call the
