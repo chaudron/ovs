@@ -99,6 +99,10 @@ ovs_prefetch_range(const void *start, size_t size)
 #define MAX(X, Y) ((X) > (Y) ? (X) : (Y))
 #endif
 
+#ifndef CLAMP
+#define CLAMP(X, MIN, MAX) ((X) < (MIN) ? (MIN) : (X) > (MAX) ? (MAX) : (X))
+#endif
+
 /* Comparisons for ints with modular arithmetic */
 #define INT_MOD_LT(a,b)     ((int) ((a)-(b)) < 0)
 #define INT_MOD_LEQ(a,b)    ((int) ((a)-(b)) <= 0)
