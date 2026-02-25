@@ -6466,10 +6466,10 @@ pmd_alloc_static_tx_qid(struct dp_netdev_pmd_thread *pmd)
         VLOG_ABORT("static_tx_qid allocation failed for PMD on core %2d"
                    ", numa_id %d.", pmd->core_id, pmd->numa_id);
     }
-    ovs_mutex_unlock(&pmd->dp->tx_qid_pool_mutex);
 
     VLOG_DBG("static_tx_qid = %d allocated for PMD thread on core %2d"
              ", numa_id %d.", pmd->static_tx_qid, pmd->core_id, pmd->numa_id);
+    ovs_mutex_unlock(&pmd->dp->tx_qid_pool_mutex);
 }
 
 static void
