@@ -500,7 +500,9 @@ tests_ovstest_SOURCES = \
 	tests/test-random.c \
 	tests/test-rcu.c \
 	tests/test-rculist.c \
+	tests/test-rcu-inline.c \
 	tests/test-reconnect.c \
+	tests/test-refmap.c \
 	tests/test-rstp.c \
 	tests/test-sflow.c \
 	tests/test-sha1.c \

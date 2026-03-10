@@ -44,6 +44,11 @@ AT_CHECK([ovstest test-ccmap check 1], [0], [...
 ])
 AT_CLEANUP
 
+AT_SETUP([refmap])
+AT_KEYWORDS([refmap])
+AT_CHECK([ovstest test-refmap check], [0], [])
+AT_CLEANUP
+
 AT_SETUP([atomic operations])
 AT_CHECK([ovstest test-atomic])
 AT_CLEANUP
@@ -273,6 +278,10 @@ AT_CLEANUP
 
 AT_SETUP([rcu])
 AT_CHECK([ovstest test-rcu], [0], [])
+AT_CLEANUP
+
+AT_SETUP([rcu inline])
+AT_CHECK([ovstest test-rcu-inline], [0], [])
 AT_CLEANUP
 
 AT_SETUP([stopwatch module])

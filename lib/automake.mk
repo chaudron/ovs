@@ -323,6 +323,8 @@ lib_libopenvswitch_la_SOURCES = \
 	lib/rculist.h \
 	lib/reconnect.c \
 	lib/reconnect.h \
+	lib/refmap.c \
+	lib/refmap.h \
 	lib/rstp.c \
 	lib/rstp.h \
 	lib/rstp-common.h \
@@ -512,6 +514,16 @@ lib_libopenvswitch_la_SOURCES += \
 else
 lib_libopenvswitch_la_SOURCES += \
 	lib/dpdk-stub.c
+endif
+
+lib_libopenvswitch_la_SOURCES += \
+	lib/ovs-doca.c \
+	lib/ovs-doca.h
+
+if DOCA_NETDEV
+lib_libopenvswitch_la_SOURCES += \
+	lib/netdev-doca.c \
+	lib/netdev-doca.h
 endif
 
 if WIN32

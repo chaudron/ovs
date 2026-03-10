@@ -1,3 +1,4 @@
+acinclude
 acl
 addresssanitizer
 afxdp
@@ -54,11 +55,13 @@ dhcpv4
 dhcpv6
 dnat
 dns
+doca
 dpcls
 dpctl
 dpdk
 dpif
 dst
+eg
 eip
 enablement
 encap
@@ -106,6 +109,7 @@ icmp
 icmp4
 icmpv6
 idl
+ie
 ifdef
 ifindex
 initializer
@@ -231,6 +235,8 @@ rebased
 recirc
 recirculation
 recirculations
+refmap
+representor
 revalidate
 revalidation
 revalidator
