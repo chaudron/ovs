@@ -262,6 +262,8 @@ The results of the testsuite are in ``tests/system-userspace-testsuite.dir``.
 All the features documented under `Unit Tests`_ are available for the userspace
 datapath testsuite.
 
+.. _userspace-datapath-dpdk:
+
 Userspace datapath with DPDK
 ++++++++++++++++++++++++++++
 
@@ -326,6 +328,28 @@ To invoke the DPDK offloads testsuite with the userspace datapath, run::
 .. note::
    This has only been tested on NVIDIA blades due to the limited availability
    of other blades that support rte_flow.
+
+Userspace datapath with DOCA offload
+++++++++++++++++++++++++++++++++++++
+
+To invoke the userspace datapath tests with DOCA offload,
+the same prerequisites apply as for :ref:`userspace-datapath-dpdk`.
+In addition, six Virtual Function (VF) interfaces must be preconfigured on a
+single Physical Function (PF) that supports DOCA hardware offload.
+
+This is an example on how to set this up for an NVIDIA blade on port
+``ens2f0np0``::
+
+   OVS_DOCA_PF_PORT=ens2f0np0
+   OVS_PF_PCI=$(basename $(readlink /sys/class/net/$OVS_DOCA_PF_PORT/device))
+   echo 0 > /sys/bus/pci/devices/$OVS_PF_PCI/sriov_numvfs
+   devlink dev eswitch set pci/$OVS_PF_PCI mode switchdev
+   echo 6 > /sys/bus/pci/devices/$OVS_PF_PCI/sriov_numvfs
+
+This PF's PCI ID needs to be passed with the OVS_PF_PORT variable.
+To invoke the DOCA offloads testsuite with the userspace datapath, run::
+
+    make check-doca-offloads OVS_PF_PCI=0000:17:00.0
 
 Userspace datapath: Testing and Validation of CPU-specific Optimizations
 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++

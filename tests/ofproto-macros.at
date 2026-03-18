@@ -228,6 +228,7 @@ m4_define([_OVS_VSWITCHD_START],
 /probe tc:/d
 /setting extended ack support failed/d
 /tc: Using policy/d
+/DOCA Disabled - Use other_config:doca-init to enable/d
 /hw-offload-priority configuration has an unknown type;/d']])
 ])
 
