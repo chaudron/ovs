@@ -19,6 +19,9 @@
 
 #include "dpif.h"
 
+/* Forward declaration of external structures. */
+struct ovs_action_hash;
+
 /* Forward declarations of private structures. */
 struct dpif_offload_class;
 struct dpif_offload;
@@ -116,6 +119,10 @@ int dpif_offload_netdev_hw_post_process(struct netdev *, unsigned pmd_id,
 bool dpif_offload_netdev_udp_tnl_get_src_port(const struct netdev *,
                                               struct dp_packet *,
                                               ovs_be16 *src_port);
+bool dpif_offload_netdev_get_dp_hash(const struct netdev *,
+                                     struct dp_packet *,
+                                     const struct ovs_action_hash *,
+                                     uint32_t *hash);
 
 
 /* Callback invoked when a hardware flow offload operation (put/del) completes.

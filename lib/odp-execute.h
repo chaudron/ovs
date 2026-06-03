@@ -24,19 +24,25 @@
 #include "openvswitch/types.h"
 
 struct nlattr;
+struct dp_packet;
 struct dp_packet_batch;
+struct ovs_action_hash;
 
-typedef void (*odp_execute_cb)(void *dp, struct dp_packet_batch *batch,
+typedef bool (*odp_execute_cb)(void *dp, struct dp_packet_batch *batch,
                                const struct nlattr *action, bool should_steal);
 
-/* Actions that need to be executed in the context of a datapath are handed
- * to 'dp_execute_action', if non-NULL.  Currently this is called only for
- * actions OVS_ACTION_ATTR_OUTPUT and OVS_ACTION_ATTR_USERSPACE so
- * 'dp_execute_action' needs to handle only these. */
+/* Executes all of the 'actions_len' bytes of datapath actions in 'actions' on
+ * the packets in 'batch'.  Actions that might require datapath-specific
+ * handling are first offered to 'dp_execute_action' (if non-NULL); if the
+ * callback returns false the action is handled by the built-in software
+ * implementation instead. */
 void odp_execute_actions(void *dp, struct dp_packet_batch *batch,
                          bool steal,
                          const struct nlattr *actions, size_t actions_len,
                          odp_execute_cb dp_execute_action);
+
+void odp_execute_hash_action(struct dp_packet *,
+                             const struct ovs_action_hash *);
 
 #define odp_get_key_mask(a, type) ((const type *)(const void *)(a + 1) + 1)
 

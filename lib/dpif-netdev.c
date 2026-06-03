@@ -8005,7 +8005,35 @@ dp_execute_lb_output_action(struct dp_netdev_pmd_thread *pmd,
     }
 }
 
-static void
+static bool
+dp_hw_offload_hash(struct dp_netdev_pmd_thread *pmd,
+                   const struct ovs_action_hash *hash_act,
+                   struct dp_packet *packet, odp_port_t *cached_in_odpp,
+                   struct netdev **cached_in_netdev)
+{
+    uint32_t dp_hash;
+
+    if (*cached_in_odpp != packet->md.orig_in_port || !*cached_in_netdev) {
+        struct tx_port *in_port = pmd_send_port_cache_lookup(
+                                      pmd, packet->md.orig_in_port);
+
+        if (!in_port) {
+            return false;
+        }
+        *cached_in_odpp = packet->md.orig_in_port;
+        *cached_in_netdev = in_port->port->netdev;
+    }
+
+    if (dpif_offload_netdev_get_dp_hash(*cached_in_netdev, packet, hash_act,
+                                        &dp_hash)) {
+        packet->md.dp_hash = dp_hash;
+        return true;
+    }
+
+    return false;
+}
+
+static bool
 dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
               const struct nlattr *a, bool should_steal)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -8022,12 +8050,12 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
     case OVS_ACTION_ATTR_OUTPUT:
         dp_execute_output_action(pmd, packets_, should_steal,
                                  nl_attr_get_odp_port(a));
-        return;
+        return true;
 
     case OVS_ACTION_ATTR_LB_OUTPUT:
         dp_execute_lb_output_action(pmd, packets_, should_steal,
                                     nl_attr_get_u32(a));
-        return;
+        return true;
 
     case OVS_ACTION_ATTR_TUNNEL_PUSH:
         if (should_steal) {
@@ -8043,7 +8071,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
             COVERAGE_ADD(datapath_drop_tunnel_push_error,
                          packet_count);
         }
-        return;
+        return true;
 
     case OVS_ACTION_ATTR_TUNNEL_POP:
         if (*depth < MAX_RECIRC_DEPTH) {
@@ -8074,7 +8102,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
                     if (!should_steal) {
                         dp_packet_batch_destroy(&tnl_pkt);
                     }
-                    return;
+                    return true;
                 }
 
                 struct dp_packet *packet;
@@ -8089,7 +8117,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
                 if (!should_steal) {
                     dp_packet_batch_destroy(&tnl_pkt);
                 }
-                return;
+                return true;
             }
             COVERAGE_ADD(datapath_drop_invalid_tnl_port,
                          dp_packet_batch_size(packets_));
@@ -8139,7 +8167,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
             ofpbuf_uninit(&actions);
             fat_rwlock_unlock(&dp->upcall_rwlock);
 
-            return;
+            return true;
         }
         COVERAGE_ADD(datapath_drop_lock_error,
                      dp_packet_batch_size(packets_));
@@ -8166,7 +8194,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
             if (!should_steal) {
                 dp_packet_batch_destroy(&recirc_pkts);
             }
-            return;
+            return true;
         }
 
         COVERAGE_ADD(datapath_drop_recirc_error,
@@ -8318,6 +8346,27 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
                             pmd->ctx.now / 1000);
         break;
 
+    case OVS_ACTION_ATTR_HASH: {
+        const struct ovs_action_hash *hash_act = nl_attr_get(a);
+        struct netdev *cached_in_netdev = NULL;
+        odp_port_t cached_in_odpp = ODPP_NONE;
+        struct dp_packet *packet;
+
+        if (!dpif_offload_enabled()) {
+            return false;
+        }
+
+        DP_PACKET_BATCH_FOR_EACH (i, packet, packets_) {
+            if (dp_hw_offload_hash(pmd, hash_act, packet,
+                                   &cached_in_odpp,
+                                   &cached_in_netdev)) {
+                continue;
+            }
+            odp_execute_hash_action(packet, hash_act);
+        }
+        break;
+    }
+
     case OVS_ACTION_ATTR_PUSH_VLAN:
     case OVS_ACTION_ATTR_POP_VLAN:
     case OVS_ACTION_ATTR_PUSH_MPLS:
@@ -8325,7 +8374,6 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
     case OVS_ACTION_ATTR_SET:
     case OVS_ACTION_ATTR_SET_MASKED:
     case OVS_ACTION_ATTR_SAMPLE:
-    case OVS_ACTION_ATTR_HASH:
     case OVS_ACTION_ATTR_UNSPEC:
     case OVS_ACTION_ATTR_TRUNC:
     case OVS_ACTION_ATTR_PUSH_ETH:
@@ -8344,6 +8392,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
     }
 
     dp_packet_delete_batch(packets_, should_steal);
+    return true;
 }
 
 static void

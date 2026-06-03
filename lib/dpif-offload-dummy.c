@@ -641,6 +641,61 @@ dummy_offload_udp_tnl_get_src_port(
 }
 
 static bool
+get_l4_sym_hash(struct flow *flow, uint32_t seed, uint32_t *hash_)
+{
+    struct ds ds = DS_EMPTY_INITIALIZER;
+    uint32_t hash = seed;
+
+    if (!dl_type_is_ip_any(flow->dl_type)) {
+        return false;
+    }
+
+    hash += flow->nw_proto;
+    if (!(flow->nw_frag & FLOW_NW_FRAG_MASK)
+        && (flow->nw_proto == IPPROTO_TCP
+            || flow->nw_proto == IPPROTO_SCTP
+            || flow->nw_proto == IPPROTO_UDP)) {
+        hash += ntohs(flow->tp_src) + ntohs(flow->tp_dst);
+    }
+
+    ds_put_format(&ds, "l4_sym_hash: %8.8x for packet: ", hash);
+    flow_format(&ds, flow, NULL);
+    VLOG_DBG("%s", ds_cstr(&ds));
+    ds_destroy(&ds);
+
+    *hash_ = hash;
+    return true;
+}
+
+static bool
+dummy_offload_get_dp_hash(const struct dpif_offload *offload OVS_UNUSED,
+                          const struct netdev *ingress_netdev OVS_UNUSED,
+                          struct dp_packet *packet,
+                          const struct ovs_action_hash *hash_act,
+                          uint32_t *hash)
+{
+    switch ((enum ovs_hash_alg) hash_act->hash_alg) {
+    case OVS_HASH_ALG_L4:
+    case OVS_HASH_ALG_SYM_L4: {
+        /* For our implementation we will use a simple symmetric L4 hash. */
+        struct flow flow;
+
+        flow_extract(packet, &flow);
+        if (!get_l4_sym_hash(&flow, hash_act->hash_basis, hash)) {
+            return false;
+        }
+        break;
+    }
+
+    case __OVS_HASH_MAX:
+    default:
+        OVS_NOT_REACHED();
+    }
+
+    return true;
+}
+
+static bool
 dummy_offload_are_all_actions_supported(const struct dpif_offload *offload_,
                                         odp_port_t in_odp,
                                         const struct nlattr *actions,
@@ -1162,6 +1217,7 @@ dummy_netdev_hw_offload_run(struct netdev *netdev)
         .get_netdev = dummy_offload_get_netdev,                             \
         .netdev_hw_post_process = dummy_offload_hw_post_process,            \
         .netdev_udp_tnl_get_src_port = dummy_offload_udp_tnl_get_src_port,  \
+        .netdev_get_dp_hash = dummy_offload_get_dp_hash,                    \
         .netdev_flow_put = dummy_flow_put,                                  \
         .netdev_flow_del = dummy_flow_del,                                  \
         .netdev_flow_stats = dummy_flow_stats,                              \
