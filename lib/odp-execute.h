@@ -24,10 +24,20 @@
 #include "openvswitch/types.h"
 
 struct nlattr;
+struct dp_packet;
 struct dp_packet_batch;
+struct ovs_action_hash;
 
 typedef void (*odp_execute_cb)(void *dp, struct dp_packet_batch *batch,
                                const struct nlattr *action, bool should_steal);
+
+/* Optional callback that allows a datapath to override the default dp-hash
+ * calculation for OVS_ACTION_ATTR_HASH.  Called per-packet during hash action
+ * processing.  Should return true and set '*hash' if the override is applied,
+ * or false to fall back to the default software hash. */
+typedef bool (*odp_hash_cb)(void *dp, struct dp_packet *packet,
+                            const struct ovs_action_hash *hash_act,
+                            uint32_t *hash);
 
 /* Actions that need to be executed in the context of a datapath are handed
  * to 'dp_execute_action', if non-NULL.  Currently this is called only for
@@ -36,7 +46,8 @@ typedef void (*odp_execute_cb)(void *dp, struct dp_packet_batch *batch,
 void odp_execute_actions(void *dp, struct dp_packet_batch *batch,
                          bool steal,
                          const struct nlattr *actions, size_t actions_len,
-                         odp_execute_cb dp_execute_action);
+                         odp_execute_cb dp_execute_action,
+                         odp_hash_cb hash_override);
 
 #define odp_get_key_mask(a, type) ((const type *)(const void *)(a + 1) + 1)
 

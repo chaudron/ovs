@@ -7708,6 +7708,8 @@ dp_netdev_recirculate(struct dp_netdev_pmd_thread *pmd,
 struct dp_netdev_execute_aux {
     struct dp_netdev_pmd_thread *pmd;
     const struct flow *flow;
+    struct netdev *cached_in_netdev;
+    odp_port_t cached_in_odpp;
 };
 
 static void
@@ -7952,6 +7954,33 @@ dp_execute_lb_output_action(struct dp_netdev_pmd_thread *pmd,
             non_atomic_ullong_add(&s_entry->n_bytes, size);
         }
     }
+}
+
+static bool
+dp_hash_override(void *aux_, struct dp_packet *packet,
+                 const struct ovs_action_hash *hash_act, uint32_t *hash)
+{
+    struct dp_netdev_execute_aux *aux = aux_;
+    struct dp_netdev_pmd_thread *pmd = aux->pmd;
+
+    if (!dpif_offload_enabled()) {
+        return false;
+    }
+
+    if (aux->cached_in_odpp != packet->md.orig_in_port
+        || !aux->cached_in_netdev) {
+        struct tx_port *in_port = pmd_send_port_cache_lookup(
+                                      pmd, packet->md.orig_in_port);
+
+        if (!in_port) {
+            return false;
+        }
+        aux->cached_in_odpp = packet->md.orig_in_port;
+        aux->cached_in_netdev = in_port->port->netdev;
+    }
+
+    return dpif_offload_netdev_get_dp_hash(aux->cached_in_netdev, packet,
+                                           hash_act, hash);
 }
 
 static void
@@ -8290,10 +8319,10 @@ dp_netdev_execute_actions(struct dp_netdev_pmd_thread *pmd,
                           bool should_steal, const struct flow *flow,
                           const struct nlattr *actions, size_t actions_len)
 {
-    struct dp_netdev_execute_aux aux = { pmd, flow };
+    struct dp_netdev_execute_aux aux = { pmd, flow, NULL, ODPP_NONE };
 
     odp_execute_actions(&aux, packets, should_steal, actions,
-                        actions_len, dp_execute_cb);
+                        actions_len, dp_execute_cb, dp_hash_override);
 }
 
 struct dp_netdev_ct_dump {

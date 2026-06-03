@@ -706,7 +706,8 @@ odp_execute_masked_set_action(struct dp_packet *packet,
 static void
 odp_execute_sample(void *dp, struct dp_packet *packet, bool steal,
                    const struct nlattr *action,
-                   odp_execute_cb dp_execute_action)
+                   odp_execute_cb dp_execute_action,
+                   odp_hash_cb hash_override)
 {
     const struct nlattr *subactions = NULL;
     const struct nlattr *a;
@@ -756,13 +757,15 @@ odp_execute_sample(void *dp, struct dp_packet *packet, bool steal,
     }
     dp_packet_batch_init_packet(&pb, packet);
     odp_execute_actions(dp, &pb, true, nl_attr_get(subactions),
-                        nl_attr_get_size(subactions), dp_execute_action);
+                        nl_attr_get_size(subactions), dp_execute_action,
+                        hash_override);
 }
 
 static void
 odp_execute_clone(void *dp, struct dp_packet_batch *batch, bool steal,
                    const struct nlattr *actions,
-                   odp_execute_cb dp_execute_action)
+                   odp_execute_cb dp_execute_action,
+                   odp_hash_cb hash_override)
 {
     if (!steal) {
         /* The 'actions' may modify the packet, but the modification
@@ -774,18 +777,21 @@ odp_execute_clone(void *dp, struct dp_packet_batch *batch, bool steal,
         dp_packet_batch_clone(&clone_pkt_batch, batch);
         dp_packet_batch_reset_cutlen(batch);
         odp_execute_actions(dp, &clone_pkt_batch, true, nl_attr_get(actions),
-                        nl_attr_get_size(actions), dp_execute_action);
+                        nl_attr_get_size(actions), dp_execute_action,
+                        hash_override);
     }
     else {
         odp_execute_actions(dp, batch, true, nl_attr_get(actions),
-                            nl_attr_get_size(actions), dp_execute_action);
+                            nl_attr_get_size(actions), dp_execute_action,
+                            hash_override);
     }
 }
 
 static void
 odp_execute_check_pkt_len(void *dp, struct dp_packet *packet, bool steal,
                           const struct nlattr *action,
-                          odp_execute_cb dp_execute_action)
+                          odp_execute_cb dp_execute_action,
+                          odp_hash_cb hash_override)
 {
     static const struct nl_policy ovs_cpl_policy[] = {
         [OVS_CHECK_PKT_LEN_ATTR_PKT_LEN] = { .type = NL_A_U16 },
@@ -842,7 +848,7 @@ odp_execute_check_pkt_len(void *dp, struct dp_packet *packet, bool steal,
      * odp_execute_actions. */
     dp_packet_batch_init_packet(&pb, packet);
     odp_execute_actions(dp, &pb, true, nl_attr_get(a), nl_attr_get_size(a),
-                        dp_execute_action);
+                        dp_execute_action, hash_override);
 }
 
 static bool
@@ -929,7 +935,8 @@ requires_datapath_assistance(const struct nlattr *a)
 void
 odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
                     const struct nlattr *actions, size_t actions_len,
-                    odp_execute_cb dp_execute_action)
+                    odp_execute_cb dp_execute_action,
+                    odp_hash_cb hash_override)
 {
     struct dp_packet *packet;
     const struct nlattr *a;
@@ -989,6 +996,12 @@ odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
                 uint32_t hash;
 
                 DP_PACKET_BATCH_FOR_EACH (i, packet, batch) {
+                    /* Allow the datapath to override the hash. */
+                    if (hash_override
+                        && hash_override(dp, packet, hash_act, &hash)) {
+                        packet->md.dp_hash = hash;
+                        continue;
+                    }
                     /* RSS hash can be used here instead of 5tuple for
                      * performance reasons. */
                     if (dp_packet_rss_valid(packet)) {
@@ -1007,6 +1020,12 @@ odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
                 uint32_t hash;
 
                 DP_PACKET_BATCH_FOR_EACH (i, packet, batch) {
+                    /* Allow the datapath to override the hash. */
+                    if (hash_override
+                        && hash_override(dp, packet, hash_act, &hash)) {
+                        packet->md.dp_hash = hash;
+                        continue;
+                    }
                     flow_extract(packet, &flow);
                     hash = flow_hash_symmetric_l3l4(&flow,
                                                     hash_act->hash_basis,
@@ -1052,7 +1071,7 @@ odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
         case OVS_ACTION_ATTR_SAMPLE:
             DP_PACKET_BATCH_FOR_EACH (i, packet, batch) {
                 odp_execute_sample(dp, packet, steal && last_action, a,
-                                   dp_execute_action);
+                                   dp_execute_action, hash_override);
             }
 
             if (last_action) {
@@ -1075,7 +1094,8 @@ odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
 
         case OVS_ACTION_ATTR_CLONE:
             odp_execute_clone(dp, batch, steal && last_action, a,
-                                                dp_execute_action);
+                                                dp_execute_action,
+                                                hash_override);
             if (last_action) {
                 /* We do not need to free the packets. odp_execute_clone() has
                  * stolen them.  */
@@ -1134,7 +1154,7 @@ odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
         case OVS_ACTION_ATTR_CHECK_PKT_LEN:
             DP_PACKET_BATCH_FOR_EACH (i, packet, batch) {
                 odp_execute_check_pkt_len(dp, packet, steal && last_action, a,
-                                          dp_execute_action);
+                                          dp_execute_action, hash_override);
             }
 
             if (last_action) {
