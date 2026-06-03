@@ -850,7 +850,7 @@ odp_execute_check_pkt_len(void *dp, struct dp_packet *packet, bool steal,
 }
 
 static bool
-requires_datapath_assistance(const struct nlattr *a)
+might_require_datapath_assistance(const struct nlattr *a)
 {
     enum ovs_action_attr type = nl_attr_type(a);
 
@@ -867,11 +867,16 @@ requires_datapath_assistance(const struct nlattr *a)
     case OVS_ACTION_ATTR_PSAMPLE:
         return true;
 
+        /* OVS_ACTION_ATTR_HASH is in general datapath-agnostic: it has a
+         * software implementation, but the datapath may override it (e.g. to
+         * use a hardware offload specific hash). */
+    case OVS_ACTION_ATTR_HASH:
+        return true;
+
     case OVS_ACTION_ATTR_SET:
     case OVS_ACTION_ATTR_SET_MASKED:
     case OVS_ACTION_ATTR_PUSH_VLAN:
     case OVS_ACTION_ATTR_POP_VLAN:
-    case OVS_ACTION_ATTR_HASH:
     case OVS_ACTION_ATTR_PUSH_MPLS:
     case OVS_ACTION_ATTR_POP_MPLS:
     case OVS_ACTION_ATTR_TRUNC:
@@ -921,15 +926,22 @@ requires_datapath_assistance(const struct nlattr *a)
  * the packets in 'batch'.  If 'steal' is true, possibly modifies and
  * definitely free the packets in 'batch', otherwise leaves 'batch' unchanged.
  *
- * Some actions (e.g. output actions) can only be executed by a datapath.  This
- * function implements those actions by passing the action and the packets to
- * 'dp_execute_action' (along with 'dp').  If 'dp_execute_action' is passed a
- * true 'steal' parameter then it must definitely free the packets passed into
- * it.  The packet can be modified whether 'steal' is false or true.  If a
- * packet is removed from the batch, then the fate of the packet is determined
- * by the code that does this removal, irrespective of the value of 'steal'.
- * Otherwise, if the packet is not removed from the batch and 'steal' is false
- * then the packet could either be cloned or not. */
+ * For actions that might require datapath-specific handling (as determined by
+ * might_require_datapath_assistance()), 'dp_execute_action' is invoked first,
+ * if non-NULL.  If the callback returns true, the action is considered fully
+ * handled and execution continues with the next action.  If the callback
+ * returns false, this function falls through to its built-in software
+ * implementation of the action.
+ *
+ * If 'dp_execute_action' returns true and was passed a true 'steal' parameter,
+ * it must have freed the packets.  If it returns false, it must not have freed
+ * the packets, as this function will fall through to its built-in software
+ * implementation and eventually free them itself.  The packet can be modified
+ * whether 'steal' is false or true.  If a packet is removed from the batch,
+ * then the fate of the packet is determined by the code that does this
+ * removal, irrespective of the value of 'steal'.  Otherwise, if the packet is
+ * not removed from the batch and 'steal' is false then the packet could either
+ * be cloned or not. */
 void
 odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
                     const struct nlattr *actions, size_t actions_len,
@@ -944,24 +956,27 @@ odp_execute_actions(void *dp, struct dp_packet_batch *batch, bool steal,
         enum ovs_action_attr attr_type = (enum ovs_action_attr) type;
         bool last_action = (left <= NLA_ALIGN(a->nla_len));
 
-        if (requires_datapath_assistance(a)) {
-            if (dp_execute_action) {
-                /* Allow 'dp_execute_action' to steal the packet data if we do
-                 * not need it any more. */
-                bool should_steal = steal && last_action;
+        if (dp_execute_action && might_require_datapath_assistance(a)) {
+            /* Allow 'dp_execute_action' to steal the packet data if we do
+             * not need it any more. */
+            bool should_steal = steal && last_action;
+            bool handled;
 
-                dp_execute_action(dp, batch, a, should_steal);
+            handled = dp_execute_action(dp, batch, a, should_steal);
 
-                if (last_action || dp_packet_batch_is_empty(batch)) {
-                    /* We do not need to free the packets.
-                     * Either dp_execute_actions() has stolen them
-                     * or the batch is freed due to errors. In either
-                     * case we do not need to execute further actions.
-                     */
-                    return;
-                }
+            if (handled && (last_action || dp_packet_batch_is_empty(batch))) {
+                /* We do not need to free the packets.  Either
+                 * dp_execute_actions() has stolen them or the batch is freed
+                 * due to errors. In either case we do not need to execute
+                 * further actions. */
+                return;
             }
-            continue;
+
+            if (handled) {
+                continue;
+            }
+            /* If not handled by the datapath for some specific reason,
+             * fall through to the non-datapath-assisted handling. */
         }
 
         switch (attr_type) {

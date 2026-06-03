@@ -8005,7 +8005,28 @@ dp_execute_lb_output_action(struct dp_netdev_pmd_thread *pmd,
     }
 }
 
-static void
+static bool
+dp_hw_offload_hash(struct dp_netdev_pmd_thread *pmd,
+                   const struct ovs_action_hash *hash_act,
+                   struct dp_packet *packet, odp_port_t *cached_in_odpp,
+                   struct netdev **cached_in_netdev)
+{
+    if (*cached_in_odpp != packet->md.orig_in_port || !*cached_in_netdev) {
+        struct tx_port *in_port = pmd_send_port_cache_lookup(
+                                      pmd, packet->md.orig_in_port);
+
+        if (!in_port) {
+            return false;
+        }
+        *cached_in_odpp = packet->md.orig_in_port;
+        *cached_in_netdev = in_port->port->netdev;
+    }
+
+    return dpif_offload_netdev_get_dp_hash(*cached_in_netdev, packet, hash_act,
+                                           &packet->md.dp_hash);
+}
+
+static bool
 dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
               const struct nlattr *a, bool should_steal)
     OVS_NO_THREAD_SAFETY_ANALYSIS
@@ -8022,12 +8043,12 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
     case OVS_ACTION_ATTR_OUTPUT:
         dp_execute_output_action(pmd, packets_, should_steal,
                                  nl_attr_get_odp_port(a));
-        return;
+        return true;
 
     case OVS_ACTION_ATTR_LB_OUTPUT:
         dp_execute_lb_output_action(pmd, packets_, should_steal,
                                     nl_attr_get_u32(a));
-        return;
+        return true;
 
     case OVS_ACTION_ATTR_TUNNEL_PUSH:
         if (should_steal) {
@@ -8043,7 +8064,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
             COVERAGE_ADD(datapath_drop_tunnel_push_error,
                          packet_count);
         }
-        return;
+        return true;
 
     case OVS_ACTION_ATTR_TUNNEL_POP:
         if (*depth < MAX_RECIRC_DEPTH) {
@@ -8074,7 +8095,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
                     if (!should_steal) {
                         dp_packet_batch_destroy(&tnl_pkt);
                     }
-                    return;
+                    return true;
                 }
 
                 struct dp_packet *packet;
@@ -8089,7 +8110,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
                 if (!should_steal) {
                     dp_packet_batch_destroy(&tnl_pkt);
                 }
-                return;
+                return true;
             }
             COVERAGE_ADD(datapath_drop_invalid_tnl_port,
                          dp_packet_batch_size(packets_));
@@ -8139,7 +8160,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
             ofpbuf_uninit(&actions);
             fat_rwlock_unlock(&dp->upcall_rwlock);
 
-            return;
+            return true;
         }
         COVERAGE_ADD(datapath_drop_lock_error,
                      dp_packet_batch_size(packets_));
@@ -8166,7 +8187,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
             if (!should_steal) {
                 dp_packet_batch_destroy(&recirc_pkts);
             }
-            return;
+            return true;
         }
 
         COVERAGE_ADD(datapath_drop_recirc_error,
@@ -8318,6 +8339,69 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
                             pmd->ctx.now / 1000);
         break;
 
+    case OVS_ACTION_ATTR_HASH: {
+        const struct ovs_action_hash *hash_act = nl_attr_get(a);
+        struct dp_packet *packet;
+        struct netdev *cached_in_netdev = NULL;
+        odp_port_t cached_in_odpp = ODPP_NONE;
+
+        if (!dpif_offload_enabled()) {
+            return false;
+        }
+
+        /* This is a hardware offload-enhanced version of similar code
+         * executed for OVS_ACTION_ATTR_HASH in odp_execute_actions(). */
+        switch (hash_act->hash_alg) {
+        case OVS_HASH_ALG_L4: {
+            struct flow flow;
+            uint32_t hash;
+
+            DP_PACKET_BATCH_FOR_EACH (i, packet, packets_) {
+                /* RSS hash can be used here instead of 5tuple for
+                 * performance reasons. */
+                if (dp_hw_offload_hash(pmd, hash_act, packet,
+                                       &cached_in_odpp,
+                                       &cached_in_netdev)) {
+                    continue;
+                }
+
+                if (dp_packet_rss_valid(packet)) {
+                    hash = dp_packet_get_rss_hash(packet);
+                    hash = hash_int(hash, hash_act->hash_basis);
+                } else {
+                    flow_extract(packet, &flow);
+                    hash = flow_hash_5tuple(&flow, hash_act->hash_basis);
+                }
+                packet->md.dp_hash = hash;
+            }
+            break;
+        }
+        case OVS_HASH_ALG_SYM_L4: {
+            struct flow flow;
+            uint32_t hash;
+
+            DP_PACKET_BATCH_FOR_EACH (i, packet, packets_) {
+                if (dp_hw_offload_hash(pmd, hash_act, packet,
+                                       &cached_in_odpp,
+                                       &cached_in_netdev)) {
+                    continue;
+                }
+
+                flow_extract(packet, &flow);
+                hash = flow_hash_symmetric_l3l4(&flow,
+                                                hash_act->hash_basis,
+                                                false);
+                packet->md.dp_hash = hash;
+            }
+            break;
+        }
+        default:
+            /* Assert on unknown hash algorithm.  */
+            OVS_NOT_REACHED();
+        }
+        break;
+    }
+
     case OVS_ACTION_ATTR_PUSH_VLAN:
     case OVS_ACTION_ATTR_POP_VLAN:
     case OVS_ACTION_ATTR_PUSH_MPLS:
@@ -8325,7 +8409,6 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
     case OVS_ACTION_ATTR_SET:
     case OVS_ACTION_ATTR_SET_MASKED:
     case OVS_ACTION_ATTR_SAMPLE:
-    case OVS_ACTION_ATTR_HASH:
     case OVS_ACTION_ATTR_UNSPEC:
     case OVS_ACTION_ATTR_TRUNC:
     case OVS_ACTION_ATTR_PUSH_ETH:
@@ -8344,6 +8427,7 @@ dp_execute_cb(void *aux_, struct dp_packet_batch *packets_,
     }
 
     dp_packet_delete_batch(packets_, should_steal);
+    return true;
 }
 
 static void
