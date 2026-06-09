@@ -47,6 +47,10 @@ struct dpif_offload_provider_collection {
                              * deletions are allowed; hence no locking of the
                              * list is required. */
 
+    atomic_uint64_t change_seq; /* Incremented by offload providers to signal
+                                 * revalidators that deferred offloads should
+                                 * be retried. */
+
     struct ovs_mutex mutex; /* Mutex to protect all below. */
     struct ovs_refcount ref_cnt;
 };
@@ -381,6 +385,7 @@ struct dpif_offload_port *dpif_offload_port_mgr_find_by_odp_port(
 
 /* Global functions, called by the dpif layer or offload providers. */
 void dpif_offload_module_init(void);
+void dpif_offload_inc_change_seq(const struct dpif *);
 void dpif_offload_set_config(struct dpif *, const struct smap *other_cfg);
 void dpif_offload_port_add(struct dpif *, struct netdev *, odp_port_t);
 void dpif_offload_port_del(struct dpif *, odp_port_t);

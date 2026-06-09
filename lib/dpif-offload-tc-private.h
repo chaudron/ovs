@@ -37,6 +37,8 @@ struct tc_offload_info {
     bool tc_modify_flow; /* Indicates tc modified the flow. */
     bool tc_modify_flow_deleted; /* Indicate the tc modify flow put success
                                   * to delete the original flow. */
+    bool offload_deferred; /* The recirc chain is not yet registered; the
+                            * revalidator should retry the offload later. */
 };
 
 /* Netdev-specific offload functions.  These should only be used by the

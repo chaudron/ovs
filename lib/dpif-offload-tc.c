@@ -487,7 +487,8 @@ tc_flow_dump_thread_destroy(struct dpif_offload_flow_dump_thread *thread_)
 
 static int
 tc_parse_flow_put(struct tc_offload *offload_tc, struct dpif *dpif,
-                  struct dpif_flow_put *put)
+                  struct dpif_flow_put *put,
+                  bool *offload_deferred)
 {
     static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
     struct dpif_offload_port *port;
@@ -498,6 +499,8 @@ tc_parse_flow_put(struct tc_offload *offload_tc, struct dpif *dpif,
     size_t left;
     int err;
 
+    *offload_deferred = false;
+    info.offload_deferred = false;
     info.tc_modify_flow_deleted = false;
     info.tc_modify_flow = false;
 
@@ -608,6 +611,7 @@ out:
         }
     }
 
+    *offload_deferred = info.offload_deferred;
     return err;
 }
 
@@ -673,12 +677,16 @@ tc_operate(struct dpif *dpif, const struct dpif_offload *offload_,
         switch (op->type) {
         case DPIF_OP_FLOW_PUT: {
             struct dpif_flow_put *put = &op->flow_put;
+            bool deferred = false;
 
             if (!put->ufid) {
                 break;
             }
 
-            error = tc_parse_flow_put(offload, dpif, put);
+            error = tc_parse_flow_put(offload, dpif, put, &deferred);
+            if (deferred) {
+                op->offload_deferred = true;
+            }
             break;
         }
         case DPIF_OP_FLOW_DEL: {

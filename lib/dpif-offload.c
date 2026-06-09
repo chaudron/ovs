@@ -274,6 +274,7 @@ dpif_attach_new_offload_provider_collection(struct dpif *dpif)
     ovs_mutex_init_recursive(&collection->mutex);
     ovs_refcount_init(&collection->ref_cnt);
     ovs_list_init(&collection->list);
+    atomic_init(&collection->change_seq, 1);
     shash_add(&dpif_offload_providers, collection->dpif_name, collection);
 
     /* Open all the providers supporting this dpif type. */
@@ -398,6 +399,33 @@ dpif_detach_offload_providers(struct dpif *dpif)
         dpif_offload_unref_collection(collection);
         ovsrcu_set(&dpif->offload_provider_collection, NULL);
     }
+}
+
+void
+dpif_offload_inc_change_seq(const struct dpif *dpif)
+{
+    struct dpif_offload_provider_collection *collection;
+    uint64_t old_change_seq;
+
+    collection = dpif_get_offload_provider_collection(dpif);
+    ovs_assert(collection);
+
+    atomic_add_explicit(&collection->change_seq, 1, &old_change_seq,
+                        memory_order_release);
+}
+
+uint64_t
+dpif_offload_get_change_seq(const struct dpif *dpif)
+{
+    struct dpif_offload_provider_collection *collection;
+    uint64_t change_seq = 0;
+
+    collection = dpif_get_offload_provider_collection(dpif);
+    if (collection) {
+        atomic_read_explicit(&collection->change_seq, &change_seq,
+                             memory_order_acquire);
+    }
+    return change_seq;
 }
 
 void

@@ -51,6 +51,7 @@
 #define UPCALL_MAX_BATCH 64
 #define REVALIDATE_MAX_BATCH 50
 #define UINT64_THREE_QUARTERS (UINT64_MAX / 4 * 3)
+#define OFFLOAD_DEFERRED_MAX_RETRIES 16
 
 VLOG_DEFINE_THIS_MODULE(ofproto_dpif_upcall);
 
@@ -348,6 +349,9 @@ struct udpif_key {
 #define OFFL_REBAL_INTVL_MSEC  3000	/* dynamic offload rebalance freq */
     struct netdev *in_netdev;		/* in_odp_port's netdev */
     bool offloaded;			/* True if flow is offloaded */
+    bool offload_deferred;		/* Deferred, retry next cycle. */
+    uint64_t offload_deferred_seq;	/* change_seq when deferred. */
+    unsigned int offload_deferred_retries; /* Retry attempts remaining. */
     uint64_t flow_pps_rate;		/* Packets-Per-Second rate */
     long long int flow_time;		/* last pps update time */
     uint64_t flow_packets;		/* #pkts seen in interval */
@@ -1685,6 +1689,7 @@ static void
 handle_upcalls(struct udpif *udpif, struct upcall *upcalls,
                size_t n_upcalls)
 {
+    uint64_t offload_seq = dpif_offload_get_change_seq(udpif->dpif);
     struct dpif_op *opsp[UPCALL_MAX_BATCH * 2];
     struct ukey_op ops[UPCALL_MAX_BATCH * 2];
     size_t n_ops, n_opsp, i;
@@ -1745,8 +1750,16 @@ handle_upcalls(struct udpif *udpif, struct upcall *upcalls,
             ovs_mutex_lock(&ukey->mutex);
             if (ops[i].dop.error) {
                 transition_ukey(ukey, UKEY_EVICTED);
-            } else if (ukey->state < UKEY_OPERATIONAL) {
-                transition_ukey(ukey, UKEY_OPERATIONAL);
+            } else {
+                if (ukey->state < UKEY_OPERATIONAL) {
+                    transition_ukey(ukey, UKEY_OPERATIONAL);
+                }
+                if (ops[i].dop.offload_deferred && !ukey->offload_deferred) {
+                    ukey->offload_deferred_seq = offload_seq;
+                    ukey->offload_deferred_retries =
+                        OFFLOAD_DEFERRED_MAX_RETRIES;
+                    ukey->offload_deferred = true;
+                }
             }
             ovs_mutex_unlock(&ukey->mutex);
         }
@@ -1837,6 +1850,9 @@ ukey_create__(const struct nlattr *key, size_t key_len,
     ukey->xcache = NULL;
 
     ukey->offloaded = false;
+    ukey->offload_deferred = false;
+    ukey->offload_deferred_seq = 0;
+    ukey->offload_deferred_retries = 0;
     ukey->in_netdev = NULL;
     ukey->flow_packets = ukey->flow_backlog_packets = 0;
 
@@ -2541,6 +2557,7 @@ put_op_init(struct ukey_op *op, struct udpif_key *ukey,
 static void
 push_dp_ops(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
 {
+    uint64_t offload_seq = dpif_offload_get_change_seq(udpif->dpif);
     struct dpif_op *opsp[REVALIDATE_MAX_BATCH];
     size_t i;
 
@@ -2552,6 +2569,22 @@ push_dp_ops(struct udpif *udpif, struct ukey_op *ops, size_t n_ops)
 
     for (i = 0; i < n_ops; i++) {
         struct ukey_op *op = &ops[i];
+
+        if (op->ukey && op->dop.type == DPIF_OP_FLOW_PUT) {
+            ovs_mutex_lock(&op->ukey->mutex);
+            if (op->dop.offload_deferred) {
+                if (!op->ukey->offload_deferred) {
+                    op->ukey->offload_deferred_retries =
+                        OFFLOAD_DEFERRED_MAX_RETRIES;
+                }
+                op->ukey->offload_deferred_seq = offload_seq;
+                op->ukey->offload_deferred = true;
+            } else if (op->ukey->offload_deferred) {
+                op->ukey->offload_deferred = false;
+                op->ukey->offload_deferred_retries = 0;
+            }
+            ovs_mutex_unlock(&op->ukey->mutex);
+        }
 
         if (op->dop.error) {
             if (op->ukey) {
@@ -2827,11 +2860,13 @@ revalidate(struct revalidator *revalidator)
     struct udpif *udpif = revalidator->udpif;
     struct dpif_flow_dump_thread *dump_thread;
     uint64_t dump_seq, reval_seq;
+    uint64_t offload_seq;
     bool kill_warn_print = true;
     unsigned int flow_limit;
 
     dump_seq = seq_read(udpif->dump_seq);
     reval_seq = seq_read(udpif->reval_seq);
+    offload_seq = dpif_offload_get_change_seq(udpif->dpif);
     atomic_read_relaxed(&udpif->flow_limit, &flow_limit);
     dump_thread = dpif_flow_dump_thread_create(udpif->dump);
     for (;;) {
@@ -2985,6 +3020,15 @@ revalidate(struct revalidator *revalidator)
                 /* Takes ownership of 'recircs'. */
                 reval_op_init(&ops[n_ops++], result, udpif, ukey, &recircs,
                               &odp_actions);
+            } else if (ukey->offload_deferred) {
+                if (offload_seq > ukey->offload_deferred_seq) {
+                    if (ukey->offload_deferred_retries > 0) {
+                        ukey->offload_deferred_retries--;
+                        put_op_init(&ops[n_ops++], ukey, DPIF_FP_MODIFY);
+                    } else {
+                        ukey->offload_deferred = false;
+                    }
+                }
             }
             ovs_mutex_unlock(&ukey->mutex);
         }

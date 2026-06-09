@@ -41,6 +41,7 @@
 #include "unaligned.h"
 #include "util.h"
 #include "dpif-offload.h"
+#include "dpif-offload-provider.h"
 #include "dpif-offload-tc-private.h"
 #include "dpif-provider.h"
 
@@ -2355,17 +2356,6 @@ tc_netdev_flow_put(struct dpif *dpif, struct netdev *netdev,
     chain = key->recirc_id;
     mask->recirc_id = 0;
 
-    if (chain) {
-        /* If we match on a recirculation ID, we must ensure the previous
-         * flow is also in the TC datapath; otherwise, the entry is useless,
-         * as the related packets will be handled by upcalls. */
-        if (!ccmap_find(&used_chains, chain)) {
-            VLOG_DBG_RL(&rl, "match for chain %u failed due to non-existing "
-                        "goto chain action", chain);
-            return EOPNOTSUPP;
-        }
-    }
-
     if (flow_tnl_dst_is_set(&key->tunnel) ||
         flow_tnl_src_is_set(&key->tunnel)) {
         VLOG_DBG_RL(&rl,
@@ -2687,6 +2677,18 @@ tc_netdev_flow_put(struct dpif *dpif, struct netdev *netdev,
         return EOPNOTSUPP;
     }
 
+    if (chain && !ccmap_find(&used_chains, chain)) {
+        /* If we match on a recirculation ID, we must ensure the previous
+         * flow is also in the TC datapath; otherwise, the entry is useless,
+         * as the related packets will be handled by upcalls.  The chain
+         * may not be registered yet because the upstream flow install is
+         * still in progress; flag it for deferred retry. */
+        VLOG_DBG_RL(&rl, "match for chain %u failed due to non-existing "
+                    "goto chain action", chain);
+        info->offload_deferred = true;
+        return EOPNOTSUPP;
+    }
+
     memset(&adjust_stats, 0, sizeof adjust_stats);
     if (get_ufid_tc_mapping(ufid, &id) == 0) {
         VLOG_DBG_RL(&rl, "updating old handle: %d prio: %d",
@@ -2725,10 +2727,16 @@ tc_netdev_flow_put(struct dpif *dpif, struct netdev *netdev,
                  * Since it does not involve recirculation handling,
                  * it should be ignored. */
                 if (action->type == TC_ACT_GOTO && action->chain) {
+                    uint32_t count;
+
                     chain_goto = action->chain;
                     ovs_mutex_lock(&used_chains_mutex);
-                    ccmap_inc(&used_chains, chain_goto);
+                    count = ccmap_inc(&used_chains, chain_goto);
                     ovs_mutex_unlock(&used_chains_mutex);
+                    if (count == 1) {
+                        /* New chain registered; notify revalidators. */
+                        dpif_offload_inc_change_seq(dpif);
+                    }
                     break;
                 }
             }
