@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include "openvswitch/util.h"
+#include "openvswitch/usdt-probes.h"
 
 #ifdef  __cplusplus
 extern "C" {
@@ -292,6 +293,7 @@ hmap_insert_fast(struct hmap *hmap, struct hmap_node *node, size_t hash)
     node->next = *bucket;
     *bucket = node;
     hmap->n++;
+    OVS_USDT_PROBE(hmap, insert, hmap, hmap->n);
 }
 
 /* Inserts 'node', with the given 'hash', into 'hmap', and expands 'hmap' if
@@ -357,7 +359,11 @@ hmap_next_with_hash__(const struct hmap_node *node, size_t hash)
 static inline struct hmap_node *
 hmap_first_with_hash(const struct hmap *hmap, size_t hash)
 {
-    return hmap_next_with_hash__(hmap->buckets[hash & hmap->mask], hash);
+    struct hmap_node *node = hmap_next_with_hash__(
+        hmap->buckets[hash & hmap->mask], hash);
+
+    OVS_USDT_PROBE(hmap, first_with_hash, hmap, hmap->n);
+    return node;
 }
 
 /* Returns the first node in 'hmap' in the bucket in which the given 'hash'
@@ -393,7 +399,10 @@ hmap_next_in_bucket(const struct hmap_node *node)
 static inline struct hmap_node *
 hmap_next_with_hash(const struct hmap_node *node)
 {
-    return hmap_next_with_hash__(node->next, node->hash);
+    struct hmap_node *next = hmap_next_with_hash__(node->next, node->hash);
+
+    OVS_USDT_PROBE(hmap, next_with_hash);
+    return next;
 }
 
 static inline struct hmap_node *
@@ -414,7 +423,10 @@ hmap_next__(const struct hmap *hmap, size_t start)
 static inline struct hmap_node *
 hmap_first(const struct hmap *hmap)
 {
-    return hmap_next__(hmap, 0);
+    struct hmap_node *node = hmap_next__(hmap, 0);
+
+    OVS_USDT_PROBE(hmap, first, hmap, hmap->n);
+    return node;
 }
 
 /* Returns the next node in 'hmap' following 'node', in arbitrary order, or a
@@ -427,9 +439,13 @@ hmap_first(const struct hmap *hmap)
 static inline struct hmap_node *
 hmap_next(const struct hmap *hmap, const struct hmap_node *node)
 {
-    return (node->next
-            ? node->next
-            : hmap_next__(hmap, (node->hash & hmap->mask) + 1));
+    struct hmap_node *next =
+        (node->next
+         ? node->next
+         : hmap_next__(hmap, (node->hash & hmap->mask) + 1));
+
+    OVS_USDT_PROBE(hmap, next, hmap);
+    return next;
 }
 
 #ifdef  __cplusplus
