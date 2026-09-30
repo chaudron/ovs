@@ -197,6 +197,7 @@ struct dpcls {
 struct dp_packet_flow_map {
     struct dp_packet *packet;
     struct dp_netdev_flow *flow;
+    struct dp_netdev_actions *alt_actions; /* NULL = use flow's own actions. */
     uint16_t tcp_flags;
 };
 
@@ -467,6 +468,17 @@ struct dpif_netdev {
     struct dp_netdev *dp;
     uint64_t last_port_seq;
 };
+
+/* Verify that struct offload_actions (defined in dpif-offload.h) is
+ * layout-identical to struct dp_netdev_actions.  The two structs are kept
+ * separate to avoid exposing dp_netdev_actions as a public API, but must
+ * remain binary-compatible so that ALIGNED_CAST() between them is safe. */
+BUILD_ASSERT_DECL(sizeof(struct offload_actions) ==
+                  sizeof(struct dp_netdev_actions));
+BUILD_ASSERT_DECL(offsetof(struct offload_actions, size) ==
+                  offsetof(struct dp_netdev_actions, size));
+BUILD_ASSERT_DECL(offsetof(struct offload_actions, actions) ==
+                  offsetof(struct dp_netdev_actions, actions));
 
 static int get_port_by_number(struct dp_netdev *dp, odp_port_t port_no,
                               struct dp_netdev_port **portp)
@@ -7060,6 +7072,7 @@ struct packet_batch_per_flow {
     unsigned int byte_count;
     uint16_t tcp_flags;
     struct dp_netdev_flow *flow;
+    struct dp_netdev_actions *alt_actions; /* NULL = use flow's own actions. */
 
     struct dp_packet_batch array;
 };
@@ -7076,11 +7089,15 @@ packet_batch_per_flow_update(struct packet_batch_per_flow *batch,
 
 static inline void ALWAYS_INLINE
 packet_batch_per_flow_init(struct packet_batch_per_flow *batch,
-                           struct dp_netdev_flow *flow)
+                           struct dp_netdev_flow *flow,
+                           struct dp_netdev_actions *alt_actions)
 {
-    flow->batch = batch;
+    if (!alt_actions) {
+        flow->batch = batch;
+    }
 
     batch->flow = flow;
+    batch->alt_actions = alt_actions;
     dp_packet_batch_init(&batch->array);
     batch->byte_count = 0;
     batch->tcp_flags = 0;
@@ -7097,37 +7114,67 @@ packet_batch_per_flow_execute(struct packet_batch_per_flow *batch,
                         batch->byte_count,
                         batch->tcp_flags, pmd->ctx.now / 1000);
 
-    actions = dp_netdev_flow_get_actions(flow);
+    actions = batch->alt_actions ? batch->alt_actions
+                                 : dp_netdev_flow_get_actions(flow);
 
     dp_netdev_execute_actions(pmd, &batch->array, true, &flow->flow,
                               actions->actions, actions->size);
 }
 
-static inline void ALWAYS_INLINE
-dp_netdev_queue_batches(struct dp_packet *pkt,
-                        struct dp_netdev_flow *flow, uint16_t tcp_flags,
-                        struct packet_batch_per_flow *batches,
-                        size_t *n_batches)
+static inline struct packet_batch_per_flow * ALWAYS_INLINE
+dp_netdev_get_batch(struct dp_netdev_flow *flow,
+                    struct dp_netdev_actions *alt_actions,
+                    struct packet_batch_per_flow *batches,
+                    size_t *n_batches)
 {
-    struct packet_batch_per_flow *batch = flow->batch;
+    struct packet_batch_per_flow *batch = NULL;
+
+    if (alt_actions == NULL) {
+        batch = flow->batch;
+    } else {
+        /* Scan for an existing batch with matching (flow, alt_actions). */
+        for (size_t i = 0; i < *n_batches; i++) {
+            if (batches[i].flow == flow &&
+                batches[i].alt_actions == alt_actions) {
+                batch = &batches[i];
+                break;
+            }
+        }
+    }
 
     if (OVS_UNLIKELY(!batch)) {
         batch = &batches[(*n_batches)++];
-        packet_batch_per_flow_init(batch, flow);
+        packet_batch_per_flow_init(batch, flow, alt_actions);
     }
 
+    return batch;
+}
+
+static inline void ALWAYS_INLINE
+dp_netdev_queue_batches(struct dp_packet *pkt,
+                        struct dp_netdev_flow *flow,
+                        struct dp_netdev_actions *alt_actions,
+                        uint16_t tcp_flags,
+                        struct packet_batch_per_flow *batches,
+                        size_t *n_batches)
+{
+    struct packet_batch_per_flow *batch;
+
+    batch = dp_netdev_get_batch(flow, alt_actions, batches, n_batches);
     packet_batch_per_flow_update(batch, pkt, tcp_flags);
 }
 
 static inline void ALWAYS_INLINE
 packet_enqueue_to_flow_map(struct dp_packet *packet,
                            struct dp_netdev_flow *flow,
+                           struct dp_netdev_actions *alt_actions,
                            uint16_t tcp_flags,
                            struct dp_packet_flow_map *flow_map,
                            size_t index)
 {
     struct dp_packet_flow_map *map = &flow_map[index];
     map->flow = flow;
+    map->alt_actions = alt_actions;
     map->packet = packet;
     map->tcp_flags = tcp_flags;
 }
@@ -7181,7 +7228,7 @@ smc_lookup_batch(struct dp_netdev_pmd_thread *pmd,
                     /* Add these packets into the flow map in the same order
                      * as received.
                      */
-                    packet_enqueue_to_flow_map(packet, flow, tcp_flags,
+                    packet_enqueue_to_flow_map(packet, flow, NULL, tcp_flags,
                                                flow_map, recv_idx);
                     n_smc_hit++;
                     hit = true;
@@ -7234,9 +7281,11 @@ smc_lookup_single(struct dp_netdev_pmd_thread *pmd,
 static inline int ALWAYS_INLINE
 dp_netdev_hw_flow(const struct dp_netdev_pmd_thread *pmd,
                   struct dp_packet *packet,
+                  struct dp_netdev_actions **alt_actions,
                   struct dp_netdev_flow **flow)
 {
     struct dp_netdev_rxq *rxq = pmd->ctx.last_rxq;
+    struct offload_actions *offload_actions = NULL;
     bool post_process_api_supported;
     void *flow_reference = NULL;
     int err;
@@ -7246,11 +7295,13 @@ dp_netdev_hw_flow(const struct dp_netdev_pmd_thread *pmd,
 
     if (!post_process_api_supported) {
         *flow = NULL;
+        *alt_actions = NULL;
         return 0;
     }
 
     err = dpif_offload_netdev_hw_post_process(rxq->port->netdev, pmd->core_id,
-                                              packet, &flow_reference);
+                                              packet, &offload_actions,
+                                              &flow_reference);
     if (err && err != EOPNOTSUPP) {
         if (err != ECANCELED) {
             COVERAGE_INC(datapath_drop_hw_post_process);
@@ -7261,6 +7312,7 @@ dp_netdev_hw_flow(const struct dp_netdev_pmd_thread *pmd,
     }
 
     *flow = flow_reference;
+    *alt_actions = ALIGNED_CAST(struct dp_netdev_actions *, offload_actions);
     return 0;
 }
 
@@ -7269,6 +7321,7 @@ dp_netdev_hw_flow(const struct dp_netdev_pmd_thread *pmd,
 static inline void ALWAYS_INLINE
 dfc_processing_enqueue_classified_packet(struct dp_packet *packet,
                                          struct dp_netdev_flow *flow,
+                                         struct dp_netdev_actions *alt_actions,
                                          uint16_t tcp_flags,
                                          bool batch_enable,
                                          struct packet_batch_per_flow *batches,
@@ -7278,17 +7331,16 @@ dfc_processing_enqueue_classified_packet(struct dp_packet *packet,
 
 {
     if (OVS_LIKELY(batch_enable)) {
-        dp_netdev_queue_batches(packet, flow, tcp_flags, batches,
+        dp_netdev_queue_batches(packet, flow, alt_actions, tcp_flags, batches,
                                 n_batches);
     } else {
         /* Flow batching should be performed only after fast-path
          * processing is also completed for packets with emc miss
          * or else it will result in reordering of packets with
          * same datapath flows. */
-        packet_enqueue_to_flow_map(packet, flow, tcp_flags,
+        packet_enqueue_to_flow_map(packet, flow, alt_actions, tcp_flags,
                                    flow_map, (*map_cnt)++);
     }
-
 }
 
 /* Try to process all ('cnt') the 'packets' using only the datapath flow cache
@@ -7339,6 +7391,7 @@ dfc_processing(struct dp_netdev_pmd_thread *pmd,
                             cnt);
     int i;
     DP_PACKET_BATCH_REFILL_FOR_EACH (i, cnt, packet, packets_) {
+        struct dp_netdev_actions *alt_actions = NULL;
         struct dp_netdev_flow *flow = NULL;
         uint16_t tcp_flags;
 
@@ -7360,17 +7413,17 @@ dfc_processing(struct dp_netdev_pmd_thread *pmd,
         }
 
         if (offload_enabled && recirc_depth == 0) {
-            if (OVS_UNLIKELY(dp_netdev_hw_flow(pmd, packet, &flow))) {
+            if (OVS_UNLIKELY(dp_netdev_hw_flow(pmd, packet, &alt_actions,
+                                               &flow))) {
                 /* Packet restoration failed and it was dropped, do not
-                 * continue processing.
-                 */
+                 * continue processing. */
                 continue;
             }
             if (OVS_LIKELY(flow)) {
                 tcp_flags = parse_tcp_flags(packet, NULL, NULL, NULL);
                 n_phwol_hit++;
                 dfc_processing_enqueue_classified_packet(
-                        packet, flow, tcp_flags, batch_enable,
+                        packet, flow, alt_actions, tcp_flags, batch_enable,
                         batches, n_batches, flow_map, &map_cnt);
                 continue;
             }
@@ -7386,7 +7439,7 @@ dfc_processing(struct dp_netdev_pmd_thread *pmd,
             if (OVS_LIKELY(flow)) {
                 n_simple_hit++;
                 dfc_processing_enqueue_classified_packet(
-                        packet, flow, tcp_flags, batch_enable,
+                        packet, flow, NULL, tcp_flags, batch_enable,
                         batches, n_batches, flow_map, &map_cnt);
                 continue;
             }
@@ -7405,7 +7458,7 @@ dfc_processing(struct dp_netdev_pmd_thread *pmd,
             tcp_flags = miniflow_get_tcp_flags(&key->mf);
             n_emc_hit++;
             dfc_processing_enqueue_classified_packet(
-                    packet, flow, tcp_flags, batch_enable,
+                    packet, flow, NULL, tcp_flags, batch_enable,
                     batches, n_batches, flow_map, &map_cnt);
         } else {
             /* Exact match cache missed. Group missed packets together at
@@ -7625,7 +7678,7 @@ fast_path_processing(struct dp_netdev_pmd_thread *pmd,
          * as received.
          */
         tcp_flags = miniflow_get_tcp_flags(&keys[i]->mf);
-        packet_enqueue_to_flow_map(packet, flow, tcp_flags,
+        packet_enqueue_to_flow_map(packet, flow, NULL, tcp_flags,
                                    flow_map, recv_idx);
     }
 
@@ -7677,8 +7730,8 @@ dp_netdev_input__(struct dp_netdev_pmd_thread *pmd,
         if (OVS_UNLIKELY(!map->flow)) {
             continue;
         }
-        dp_netdev_queue_batches(map->packet, map->flow, map->tcp_flags,
-                                batches, &n_batches);
+        dp_netdev_queue_batches(map->packet, map->flow, map->alt_actions,
+                                map->tcp_flags, batches, &n_batches);
      }
 
     /* All the flow batches need to be reset before any call to

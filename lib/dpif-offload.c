@@ -1438,6 +1438,7 @@ dpif_offload_datapath_flow_stats(const char *dpif_name, odp_port_t in_port,
 int
 dpif_offload_netdev_hw_post_process(struct netdev *netdev, unsigned pmd_id,
                                     struct dp_packet *packet,
+                                    struct offload_actions **alt_actions,
                                     void **flow_reference)
 {
     const struct dpif_offload *offload;
@@ -1463,7 +1464,8 @@ dpif_offload_netdev_hw_post_process(struct netdev *netdev, unsigned pmd_id,
     }
 
     rc = offload->class->netdev_hw_post_process(offload, netdev, pmd_id,
-                                                packet, flow_reference);
+                                                packet, alt_actions,
+                                                flow_reference);
     if (rc == EOPNOTSUPP) {
         /* API unsupported by the port; avoid subsequent calls. */
         atomic_store_relaxed(&netdev->hw_info.post_process_api_supported,
