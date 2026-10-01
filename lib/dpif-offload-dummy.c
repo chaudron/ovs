@@ -45,6 +45,7 @@ struct dummy_offloaded_flow {
     struct match match;
     const struct nlattr *actions;
     size_t actions_len;
+    struct offload_actions *alt_actions;
     ovs_u128 ufid;
     uint32_t mark;
     struct dpif_flow_stats stats;
@@ -74,6 +75,7 @@ struct dummy_offload_port {
     uint64_t rx_offload_full OVS_GUARDED; /* Fully offloaded, CPU bypassed. */
     uint64_t rx_offload_miss OVS_GUARDED; /* No HW offload rule matched. */
     uint64_t rx_offload_pipe_abort OVS_GUARDED; /* Pipeline abort. */
+    uint64_t rx_offload_alt_actions OVS_GUARDED; /* Partial action offload. */
 };
 
 struct hw_pkt_node {
@@ -246,6 +248,7 @@ dummy_free_flow(struct dummy_offload_port *port,
 
     hmap_destroy(&off_flow->pmd_id_map);
     free(CONST_CAST(struct nlattr *, off_flow->actions));
+    ovsrcu_postpone(free, off_flow->alt_actions);
     free(off_flow);
 }
 
@@ -489,6 +492,8 @@ dummy_offload_get_debug(const struct dpif_offload *offload, struct ds *ds,
                             json_integer_create(port->rx_offload_miss));
             json_object_put(json_port, "rx_offload_pipe_abort",
                             json_integer_create(port->rx_offload_pipe_abort));
+            json_object_put(json_port, "rx_offload_alt_actions",
+                            json_integer_create(port->rx_offload_alt_actions));
             ovs_mutex_unlock(&port->port_mutex);
 
             json_object_put(json_ports, netdev_get_name(port_->netdev),
@@ -509,13 +514,15 @@ dummy_offload_get_debug(const struct dpif_offload *offload, struct ds *ds,
             ovs_mutex_lock(&port->port_mutex);
             ds_put_format(ds,
                           "  - %s: port_no: %u\n"
-                          "    rx_offload_partial   : %" PRIu64 "\n"
-                          "    rx_offload_full      : %" PRIu64 "\n"
-                          "    rx_offload_miss      : %" PRIu64 "\n"
-                          "    rx_offload_pipe_abort: %" PRIu64 "\n",
+                          "    rx_offload_partial    : %" PRIu64 "\n"
+                          "    rx_offload_full       : %" PRIu64 "\n"
+                          "    rx_offload_miss       : %" PRIu64 "\n"
+                          "    rx_offload_pipe_abort : %" PRIu64 "\n"
+                          "    rx_offload_alt_actions: %" PRIu64 "\n",
                           netdev_get_name(port_->netdev), port_->port_no,
                           port->rx_offload_partial, port->rx_offload_full,
-                          port->rx_offload_miss, port->rx_offload_pipe_abort);
+                          port->rx_offload_miss, port->rx_offload_pipe_abort,
+                          port->rx_offload_alt_actions);
             ovs_mutex_unlock(&port->port_mutex);
         }
     }
@@ -589,10 +596,10 @@ dummy_offload_hw_post_process(const struct dpif_offload *offload_,
     void *flow_reference = NULL;
     uint32_t flow_mark;
 
+    *alt_actions = NULL;
     port = dummy_offload_get_port_by_netdev(offload_, netdev);
     if (!port || !dp_packet_has_flow_mark(packet, &flow_mark)) {
         *flow_reference_ = NULL;
-        *alt_actions = NULL;
         return 0;
     }
 
@@ -605,13 +612,15 @@ dummy_offload_hw_post_process(const struct dpif_offload *offload_,
             if (pmd_data) {
                 flow_reference = pmd_data->flow_reference;
             }
+            if (off_flow->alt_actions) {
+                *alt_actions = off_flow->alt_actions;
+            }
             break;
         }
     }
     ovs_mutex_unlock(&port->port_mutex);
 
     *flow_reference_ = flow_reference;
-    *alt_actions = NULL;
     return 0;
 }
 
@@ -724,22 +733,23 @@ dummy_offload_are_all_actions_supported(const struct dpif_offload *offload_,
     return true;
 }
 
-static bool
+static int
 dummy_offload_hw_process_pkt(const struct dpif_offload *offload_,
                              struct dummy_offloaded_flow *flow,
                              struct dp_packet *pkt)
 {
+    bool partial_act = flow->alt_actions != NULL;
     uint32_t hash = dp_packet_get_rss_hash(pkt);
     uint32_t pkt_size = dp_packet_size(pkt);
     const struct nlattr *nla;
     size_t left;
 
     if (!flow->actions) {
-        return false;
+        return -ENOENT;
     }
 
     NL_ATTR_FOR_EACH (nla, left, flow->actions, flow->actions_len) {
-        bool last_action = (left <= NLA_ALIGN(nla->nla_len));
+        bool last_action = !partial_act && (left <= NLA_ALIGN(nla->nla_len));
         enum ovs_action_attr action = nl_attr_type(nla);
 
         switch (action) {
@@ -751,7 +761,14 @@ dummy_offload_hw_process_pkt(const struct dpif_offload *offload_,
 
             port = dummy_offload_get_port_by_odp_port(offload_, odp_port);
             if (!port) {
-                return false;
+                return -ENODEV;
+            }
+
+            /* Skip non-dummy-pmd ports here, as they are handled via the
+             * alternative actions returned by the hw_post_process callback. */
+            if (partial_act && strcmp("dummy-pmd",
+                                      netdev_get_type(port->pm_port.netdev))) {
+                break;
             }
 
             n_txq = netdev_n_txq(port->pm_port.netdev);
@@ -817,7 +834,59 @@ dummy_offload_hw_process_pkt(const struct dpif_offload *offload_,
     flow->stats.n_bytes += pkt_size;
     flow->stats.n_packets++;
     flow->stats.used = time_msec();
-    return true;
+
+    /* For mixed offload, return -EAGAIN so the caller re-injects the packet
+     * to the CPU for alt_actions processing. */
+    return partial_act ? -EAGAIN : 0;
+}
+
+/* Build a set of alternative actions to exercise the alt_actions support in
+ * the netdev_hw_post_process() API.  The dummy implementation returns
+ * alternative actions only when the action list consists solely of
+ * OVS_ACTION_ATTR_OUTPUT actions, and at least one egress port is not of
+ * type dummy-pmd.  In that case, the dummy-pmd outputs are handled in
+ * 'hardware', while the non-dummy-pmd outputs are returned as alternative
+ * actions to be executed by the PMD thread. */
+static struct offload_actions *
+dummy_build_alt_actions(const struct dpif_offload *offload_,
+                        odp_port_t in_odp,
+                        const struct nlattr *actions,
+                        size_t actions_len)
+{
+    struct offload_actions *alt_actions = NULL;
+    const struct nlattr *nla;
+    struct ofpbuf buf;
+    size_t left;
+
+    ofpbuf_init(&buf, 0);
+
+    NL_ATTR_FOR_EACH (nla, left, actions, actions_len) {
+        enum ovs_action_attr action = nl_attr_type(nla);
+
+        if (action != OVS_ACTION_ATTR_OUTPUT) {
+            goto out;
+        }
+
+        odp_port_t out_odp = nl_attr_get_odp_port(nla);
+        struct dummy_offload_port *out_port =
+            dummy_offload_get_port_by_odp_port(offload_, out_odp);
+
+        if (out_odp != in_odp && (!out_port
+            || strcmp("dummy-pmd",
+                      netdev_get_type(out_port->pm_port.netdev)))) {
+            ofpbuf_put(&buf, nla, nla->nla_len);
+        }
+    }
+
+    if (buf.size) {
+        alt_actions = xmalloc(sizeof *alt_actions + buf.size);
+        alt_actions->size = buf.size;
+        memcpy(alt_actions->actions, buf.data, buf.size);
+    }
+
+out:
+    ofpbuf_uninit(&buf);
+    return alt_actions;
 }
 
 static int
@@ -864,12 +933,25 @@ dummy_flow_put(const struct dpif_offload *offload_, struct netdev *netdev,
     }
     memcpy(&off_flow->match, put->match, sizeof *put->match);
     free(CONST_CAST(struct nlattr *, off_flow->actions));
+    ovsrcu_postpone(free, off_flow->alt_actions);
+    off_flow->alt_actions = NULL;
     if (full_offload) {
         off_flow->actions = xmemdup(put->actions, put->actions_len);
         off_flow->actions_len = put->actions_len;
     } else {
-        off_flow->actions = NULL;
-        off_flow->actions_len = 0;
+        off_flow->alt_actions = dummy_build_alt_actions(
+            offload_,
+            put->match->flow.in_port.odp_port,
+            put->actions, put->actions_len);
+        if (off_flow->alt_actions) {
+            /* Partial action offload to test the alt_actions API. */
+            off_flow->actions = xmemdup(put->actions, put->actions_len);
+            off_flow->actions_len = put->actions_len;
+        } else {
+            /* Classic partial offload, i.e., only flow matching. */
+            off_flow->actions = NULL;
+            off_flow->actions_len = 0;
+        }
     }
 
     /* As we have per-netdev 'offloaded_flows', we don't need to match
@@ -1028,6 +1110,7 @@ dummy_netdev_simulate_offload(struct netdev *netdev, struct dp_packet *packet,
     struct dummy_offload_port *port;
     bool packet_stolen = false;
     struct flow packet_flow;
+    uint32_t existing_mark;
     bool offloaded = false;
 
     if (!dpif_offload_enabled() || !offload
@@ -1037,6 +1120,12 @@ dummy_netdev_simulate_offload(struct netdev *netdev, struct dp_packet *packet,
 
     port = dummy_offload_get_port_by_netdev(offload, netdev);
     if (!port) {
+        return false;
+    }
+
+    /* If the packet already has a flow mark, it was re-injected, so let it
+     * continue to the CPU so hw_post_process can return alt_actions. */
+    if (dp_packet_has_flow_mark(packet, &existing_mark)) {
         return false;
     }
 
@@ -1072,9 +1161,6 @@ dummy_netdev_simulate_offload(struct netdev *netdev, struct dp_packet *packet,
             }
 
             if (data->actions) {
-                /* Perform hardware offload simulation.  The packet is stolen
-                 * here and handed off to the PMD thread callback for
-                 * processing. */
                 struct hw_pkt_node *pkt_node = xmalloc(sizeof *pkt_node);
 
                 pkt_node->pkt = packet;
@@ -1124,7 +1210,7 @@ dummy_netdev_hw_offload_run(struct netdev *netdev)
         LIST_FOR_EACH_POP (pkt_node, list_node, &port->hw_recv_queue) {
             struct dummy_offloaded_flow *offloaded_flow;
             struct dp_packet *pkt = pkt_node->pkt;
-            bool processed = false;
+            int err = -ENOENT;
             struct flow flow;
 
             flow_extract(pkt, &flow);
@@ -1132,13 +1218,18 @@ dummy_netdev_hw_offload_run(struct netdev *netdev)
                 if (flow_equal_except(&flow, &offloaded_flow->match.flow,
                                       &offloaded_flow->match.wc)) {
 
-                    processed = dummy_offload_hw_process_pkt(
-                                    offload, offloaded_flow, pkt);
+                    err = dummy_offload_hw_process_pkt(offload, offloaded_flow,
+                                                       pkt);
                     break;
                 }
             }
 
-            if (!processed) {
+            if (err == -EAGAIN) {
+                /* We failed full processing as we have alt_actions. */
+                port->rx_offload_alt_actions++;
+                netdev_dummy_queue_simulate_offload_packet(
+                    port->pm_port.netdev, pkt, pkt_node->queue_id);
+            } else if (err) {
                 VLOG_DBG("Failed HW pipeline, sent to sw!");
                 port->rx_offload_pipe_abort++;
                 netdev_dummy_queue_simulate_offload_packet(
