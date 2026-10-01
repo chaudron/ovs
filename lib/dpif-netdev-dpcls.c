@@ -43,7 +43,7 @@ struct block_array {
 
 DEFINE_PER_THREAD_MALLOCED_DATA(struct block_array *, block_array);
 
-static inline uint64_t *
+static inline uint64_t * ALWAYS_INLINE
 get_blocks_scratch(uint32_t required_count)
 {
     struct block_array *array = block_array_get();
@@ -63,7 +63,7 @@ get_blocks_scratch(uint32_t required_count)
     return &array->blocks[0];
 }
 
-static inline void
+static inline void ALWAYS_INLINE
 netdev_flow_key_flatten_unit(const uint64_t *pkt_blocks,
                              const uint64_t *tbl_blocks,
                              const uint64_t *mf_masks,
@@ -106,7 +106,7 @@ netdev_flow_key_flatten_unit(const uint64_t *pkt_blocks,
  * unrolled, or possibly removed totally by unrolling by the loop iterations.
  * The compile time optimizations enabled by this design improves performance.
  */
-static inline void
+static inline void ALWAYS_INLINE
 netdev_flow_key_flatten(const struct netdev_flow_key *key,
                         const struct netdev_flow_key *mask,
                         const uint64_t *mf_masks,
@@ -147,7 +147,7 @@ netdev_flow_key_flatten(const struct netdev_flow_key *key,
 }
 
 /* Compares a rule and the blocks representing a key, returns 1 on a match. */
-static inline uint64_t
+static inline uint64_t ALWAYS_INLINE
 netdev_rule_matches_key(const struct dpcls_rule *rule,
                         const uint32_t mf_bits_total,
                         const uint64_t *blocks_scratch)
