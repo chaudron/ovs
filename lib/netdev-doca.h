@@ -23,6 +23,7 @@
 
 #include <doca_flow.h>
 
+#include "dpif-offload-doca-private.h"
 #include "netdev-dpdk-common.h"
 #include "netdev-provider.h"
 #include "ovs-doca.h"
@@ -90,6 +91,7 @@ struct netdev_doca_esw_ctx {
     struct doca_dev *dev;
     uint32_t op_state;
     int cmd_fd;
+    struct doca_offload_esw_data offload_data;
 };
 
 struct netdev_doca {
@@ -112,5 +114,11 @@ BUILD_ASSERT_DECL(offsetof(struct netdev_doca, common) == 0);
 void netdev_doca_register(void);
 
 struct netdev_doca *netdev_doca_cast(const struct netdev *netdev);
+
+struct doca_offload_esw_data *
+netdev_doca_get_esw_offload_data(struct netdev *netdev);
+
+bool
+netdev_doca_is_esw_mgr(const struct netdev *netdev);
 
 #endif /* NETDEV_DOCA_H */

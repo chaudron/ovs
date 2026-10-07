@@ -46,6 +46,8 @@ struct ovs_doca_steering_queue {
 struct ovs_doca_flow_actions {
     struct doca_flow_actions d;
     ovs_be32 mark;
+    uint32_t encap_type;
+    uint32_t encap_size;
 };
 BUILD_ASSERT_DECL(offsetof(struct ovs_doca_flow_actions, d) == 0);
 

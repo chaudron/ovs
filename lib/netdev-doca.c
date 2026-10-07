@@ -123,7 +123,7 @@ netdev_doca_get_port_id(const struct netdev *netdev)
     return dev->common.port_id;
 }
 
-static bool
+bool
 netdev_doca_is_esw_mgr(const struct netdev *netdev)
 {
     dpdk_port_t esw_mgr_id = netdev_doca_get_esw_mgr_port_id(netdev);
@@ -2694,6 +2694,14 @@ netdev_doca_send(struct netdev *netdev, int qid,
     }
 
     return 0;
+}
+
+struct doca_offload_esw_data *
+netdev_doca_get_esw_offload_data(struct netdev *netdev)
+{
+    struct netdev_doca *dev = netdev_doca_cast(netdev);
+
+    return dev->esw_ctx ? &dev->esw_ctx->offload_data : NULL;
 }
 
 #define NETDEV_DOCA_CLASS_COMMON                            \
