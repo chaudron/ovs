@@ -323,6 +323,7 @@ struct dpif_offload_class {
 extern struct dpif_offload_class dpif_offload_dummy_class;
 extern struct dpif_offload_class dpif_offload_dummy_x_class;
 extern struct dpif_offload_class dpif_offload_dpdk_class;
+extern struct dpif_offload_class dpif_offload_doca_class;
 extern struct dpif_offload_class dpif_offload_tc_class;
 
 

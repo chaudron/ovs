@@ -48,13 +48,16 @@ static const struct dpif_offload_class *base_dpif_offload_classes[] = {
 #ifdef DPDK_NETDEV
     &dpif_offload_dpdk_class,
 #endif
+#ifdef DOCA_NETDEV
+    &dpif_offload_doca_class,
+#endif
     /* While adding a new offload class to this structure make sure to also
      * update the dpif_offload_provider_priority_list below. */
     &dpif_offload_dummy_class,
     &dpif_offload_dummy_x_class,
 };
 
-#define DEFAULT_PROVIDER_PRIORITY_LIST "tc,dpdk,dummy,dummy_x"
+#define DEFAULT_PROVIDER_PRIORITY_LIST "doca,tc,dpdk,dummy,dummy_x"
 
 static char *dpif_offload_provider_priority_list = NULL;
 static atomic_bool offload_global_enabled = false;
