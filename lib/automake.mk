@@ -457,6 +457,8 @@ if DOCA_NETDEV
 lib_libopenvswitch_la_SOURCES += \
 	lib/doca-pipe-group.c \
 	lib/doca-pipe-group.h \
+	lib/dpif-offload-doca.c \
+	lib/dpif-offload-doca-netdev.c \
 	lib/dpif-offload-doca-private.h \
 	lib/netdev-doca.c \
 	lib/netdev-doca.h

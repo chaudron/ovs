@@ -121,4 +121,11 @@ netdev_doca_get_esw_offload_data(struct netdev *netdev);
 bool
 netdev_doca_is_esw_mgr(const struct netdev *netdev);
 
+uint16_t
+netdev_doca_get_port_id(const struct netdev *netdev);
+
+int
+netdev_doca_parse_dpdk_devargs_pci(const char *devargs,
+                                   struct rte_pci_addr *rte_pci);
+
 #endif /* NETDEV_DOCA_H */

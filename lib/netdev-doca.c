@@ -41,8 +41,11 @@
 #include <doca_rdma_bridge.h>
 
 #include "coverage.h"
+#include "doca-pipe-group.h"
 #include "dp-packet.h"
 #include "dpif-netdev.h"
+#include "dpif-offload.h"
+#include "dpif-offload-doca-private.h"
 #include "netdev-provider.h"
 #include "ovs-doca.h"
 #include "ovs-thread.h"
@@ -111,7 +114,7 @@ netdev_doca_get_esw_mgr_port_id(const struct netdev *netdev)
     return dev->esw_mgr_port_id;
 }
 
-static dpdk_port_t
+dpdk_port_t
 netdev_doca_get_port_id(const struct netdev *netdev)
 {
     struct netdev_doca *dev = netdev_doca_cast(netdev);
@@ -630,6 +633,10 @@ netdev_doca_egress_entry_uninit(struct netdev *netdev)
 static void
 netdev_doca_slowpath_esw_uninit(struct netdev *netdev)
 {
+    if (dpif_offload_enabled()) {
+        doca_netdev_offload_stop(netdev);
+    }
+
     netdev_doca_root_pipe_uninit(netdev);
     netdev_doca_pre_miss_rules_uninit(netdev);
     netdev_doca_pre_miss_pipe_uninit(netdev);
@@ -663,6 +670,9 @@ netdev_doca_slowpath_esw_init(struct netdev *netdev)
     ESW_INIT_CMD(netdev_doca_pre_miss_pipe_init);
     ESW_INIT_CMD(netdev_doca_pre_miss_rules_init);
     ESW_INIT_CMD(netdev_doca_root_pipe_init);
+    if (dpif_offload_enabled()) {
+        doca_netdev_offload_start(netdev);
+    }
 
     return 0;
 }
@@ -1218,7 +1228,7 @@ netdev_doca_class_init(void)
 
 /* Extract the PCI part from 'devargs' to rte_pci.
  * Return EINVAL for error or 0 for success. */
-static int
+int
 netdev_doca_parse_dpdk_devargs_pci(const char *devargs,
                                    struct rte_pci_addr *rte_pci)
 {
